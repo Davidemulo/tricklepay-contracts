@@ -373,6 +373,48 @@ token that calls back into this contract from within `transfer`). See
 and [§ What happens when a token transfer fails](THREAT_MODEL.md#what-happens-when-a-token-transfer-fails)
 for the full breakdown and who is responsible for choosing a conforming token.
 
+## Error code reference
+
+Every entry point that can fail returns a `Result<T, StreamError>`. The table
+below lists all error variants, their stable integer codes, and when each is
+returned. These codes are part of the contract's public interface and never
+change — clients and indexers can map the integer directly to a specific
+failure condition.
+
+**Code 2 is retired.** It was assigned to an `Unauthorized` variant that was
+never constructed (authorization is enforced with `require_auth()`, which
+panics with a host error before the entry point body runs, so that variant
+could never have been returned). The gap is deliberate and `2` will not be
+reassigned.
+
+| Code | Variant                   | Returned when                                                                                                                                                                                                     |
+| ---- | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | `StreamNotFound`          | The requested stream id does not exist in storage — either it was never created, or the `create_stream` call that would have assigned it was rejected.                                                             |
+| 3    | `InvalidTimeRange`        | `start_time` is not strictly before `end_time` at stream creation.                                                                                                                                                 |
+| 4    | `InvalidAmount`           | `total_amount` is zero or negative at stream creation, or `withdraw_amount` is called with a non-positive amount.                                                                                                  |
+| 5    | `InvalidCliff`            | `cliff_time` falls outside `[start_time, end_time]` at stream creation.                                                                                                                                            |
+| 6    | `AlreadyCancelled`        | `cancel` is called on a stream that has already been cancelled.                                                                                                                                                    |
+| 7    | `NothingToWithdraw`       | `withdraw` is called when the withdrawable balance is zero (nothing has vested yet, or everything vested has already been withdrawn).                                                                              |
+| 8    | `InsufficientBalance`     | `withdraw_amount` requests more than the withdrawable balance.                                                                                                                                                     |
+| 9    | `StreamAlreadyCompleted`  | `cancel` is called at or after `end_time` — a fully vested stream has nothing unvested to refund.                                                                                                                 |
+| 10   | `AmountTooLarge`          | `total_amount` exceeds `MAX_AMOUNT` (i64::MAX) at stream creation. The cap guarantees vesting arithmetic never overflows.                                                                                         |
+| 11   | `StreamWindowInPast`      | `end_time` is not in the future at stream creation — the window would be entirely in the past, making the stream 100 % vested immediately (use a direct token transfer instead).                                  |
+| 12   | `StreamCountExhausted`    | The stream id counter has reached `u64::MAX` and cannot increment further without wrapping (which would overwrite existing streams). No further streams can be created on this contract instance.                 |
+| 13   | `InvalidParticipant`      | At stream creation, `sender` and `recipient` are the same address, or any of `sender`, `recipient`, or `token` is the stream contract's own address, or the `token` address appears as `sender` or `recipient`. |
+
+**Token contract errors.** When a token `transfer` fails — for example,
+insufficient balance or a missing trustline — the failure surfaces as
+`Error(Contract, #N)` with the **token contract's** error number, not one of
+the codes above. Some of these collide: the Stellar Asset Contract's
+`BalanceError` is `10`, the same as `AmountTooLarge`; its `OverflowError` is
+`12`, the same as `StreamCountExhausted`; and its `TrustlineMissingError` is
+`13`, the same as `InvalidParticipant`. To distinguish them, check the failing
+contract's address in the transaction's diagnostic events — if it matches this
+stream contract, use the table above; if it matches the token passed to
+`create_stream`, use that token's error table. See
+[`contracts/stream/src/error.rs`](contracts/stream/src/error.rs) for a full
+explanation and list of known collisions with the Stellar Asset Contract.
+
 ## Development workflow
 
 All common contributor tasks are wrapped in the `Makefile`. Run `make` (or
