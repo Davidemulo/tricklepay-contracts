@@ -196,6 +196,11 @@ cancel(id)           -> 500   // sender refund (unvested only)
 withdraw(id)         -> 300   // recipient claims their remaining vested balance
 ```
 
+**Rejected cancels.** A `cancel` call is rejected with `StreamAlreadyCompleted`
+if `now >= end_time` — once the stream has fully vested there is nothing
+unvested to refund. A stream that has already been cancelled cannot be
+cancelled again (`AlreadyCancelled`).
+
 ### Worked example: vesting schedule with a cliff
 
 This example uses a one-year stream with a three-month cliff — the shape
@@ -528,7 +533,7 @@ Integer division in the vesting formula **truncates** (rounds down), which means
 
 **Which party does this favor?**
 
-Rounding down **favors the sender** (and delays the recipient). A fractional token that has partially vested is not yet withdrawable by the recipient. It only becomes available once enough additional time has passed to push the vested amount over the next whole-token boundary.
+Rounding down **favors the sender** (and delays the recipient). A fractional token that has partially vested is not yet withdrawable by the recipient. It only becomes available once enough additional time has passed to push the vested amount over the next whole-token boundary. If the stream runs to completion the recipient still receives the full `total_amount`; if it is cancelled first, the unvested remainder — the truncated fraction included — is refunded to the sender. The contract never keeps the truncated remainder.
 
 **Maximum size of the difference:**
 
@@ -993,10 +998,20 @@ without deploying, if the build fails or the identity is unknown or unfunded.
 
 ## Project structure
 
-A `cancel` call is rejected with `StreamAlreadyCompleted` if `now >= end_time`
-— once the stream has fully vested there is nothing unvested to refund. A
-stream that has already been cancelled cannot be cancelled again
-(`AlreadyCancelled`).
+The contract lives in `contracts/stream/`, split so that each concern is
+isolated and testable:
+
+| Path                                 | Purpose                                                                                                                                                    |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `contracts/stream/src/lib.rs`        | Crate entry point: the `no_std` declaration and module wiring.                                                                                             |
+| `contracts/stream/src/contract.rs`   | The `#[contract]` / `#[contractimpl]` entry points (`create_stream`, `withdraw`, `cancel`, the views) and the `MAX_AMOUNT` ceiling.                        |
+| `contracts/stream/src/vesting.rs`    | Pure vesting arithmetic (`vested_amount`, `withdrawable_amount`) that takes plain numbers, with no environment or storage.                                 |
+| `contracts/stream/src/status.rs`     | Pure lifecycle derivation (`stream_status`) from a stream's fields and a timestamp.                                                                        |
+| `contracts/stream/src/types.rs`      | The on-chain `Stream` record and `StreamStatus` enum.                                                                                                      |
+| `contracts/stream/src/storage.rs`    | Persistent storage keys and time-to-live (TTL) management — the single place every ledger entry is read and written.                                       |
+| `contracts/stream/src/events.rs`     | The `Created`, `Withdrawn`, and `Cancelled` event types and their topic layout.                                                                            |
+| `contracts/stream/src/error.rs`      | The `StreamError` enum and its stable integer codes.                                                                                                      |
+| `contracts/stream/src/tests/`        | Integration suite run against the generated contract client, one module per functional area.                                                               |
 
 ### Boundary and edge-case notes
 
@@ -1032,7 +1047,14 @@ overflows for any amount at or below the `MAX_AMOUNT` cap (`i64::MAX` stroops).
 
 Because this is **integer (truncating) division**, any fractional stroop is
 discarded toward zero. The recipient is never credited more than their exact
-linear share — the rounding always favours the contract.
+linear share, but the discarded fraction is not kept by the contract either:
+the truncated remainder simply stays **unvested**. Truncation therefore
+**favours the sender** and delays the recipient, the same conclusion as
+[Rounding direction](#rounding-direction). If the stream runs to `end_time`,
+the final calculation returns exactly `total_amount` and the recipient receives
+the full sum; if the sender cancels first, the still-unvested remainder —
+truncated fraction included — is refunded to the sender. The contract never
+retains the remainder.
 
 ### Amount ceiling
 
@@ -1055,13 +1077,16 @@ elapsed value, `total_amount` must satisfy:
 
 ```
 total_amount * u64::MAX ≤ i128::MAX
-total_amount ≤ i128::MAX / u64::MAX ≈ 5.0 × 10¹⁸
+total_amount ≤ i128::MAX / u64::MAX = 9 223 372 036 854 775 808 = 2⁶³
 ```
 
-`i64::MAX` (≈ 9.2 × 10¹⁸) is above that quotient, so the bound used in the
-contract is slightly conservative, but it is the cleanest expressible limit and
-is well above the total supply of any realistic token. A call that exceeds the
-ceiling is rejected with `AmountTooLarge` before any tokens move.
+That quotient is exactly one more than `i64::MAX`
+(9 223 372 036 854 775 807), so capping `total_amount` at `i64::MAX` is not a
+conservative choice — it is the largest value the arithmetic admits. The
+product `i64::MAX * u64::MAX` is
+170 141 183 460 469 231 704 017 187 605 319 778 305, which still fits inside
+`i128::MAX` with about 2.77 × 10¹⁹ to spare. A call that exceeds the ceiling is
+rejected with `AmountTooLarge` before any tokens move.
 
 **No-cliff example:** a stream of **1000 units over `[100, 1100]`** with
 `cliff_time == start_time == 100` (no cliff):
@@ -1093,10 +1118,5 @@ Integrator-facing operational policy for this contract lives in
 
 ## Recent Changes
 
-- Ongoing improvements and fixes as part of active development.
-- See commit history and open issues for detailed change tracking.
-
-## Recent Changes
-
-- Ongoing improvements and fixes as part of active development.
-- See commit history and open issues for detailed change tracking.
+See [CHANGELOG.md](CHANGELOG.md) for the full history of changes to this
+contract.
