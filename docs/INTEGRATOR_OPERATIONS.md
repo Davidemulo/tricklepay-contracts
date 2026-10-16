@@ -259,7 +259,10 @@ The type system permits `u64` Unix-second timestamps, but the practical maximum
 stream duration is much shorter than that. Treat **30 days without any stream
 access** as the operational limit imposed by storage rent, and treat streams
 longer than 30 days as safe only if a keeper, indexer, wallet, or user action
-touches the stream at least once per 24-day window.
+touches the stream at least once per `BUMP_THRESHOLD` ledgers (roughly six
+days). A touch only re-extends the record while fewer than `BUMP_THRESHOLD`
+ledgers remain, so a sparser cadence — a monthly one, say — reads the stream
+without postponing its expiry.
 
 The limit comes from the contract's storage TTL policy:
 

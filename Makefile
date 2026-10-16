@@ -3,26 +3,21 @@
 WASM_TARGET := wasm32v1-none
 WASM := target/$(WASM_TARGET)/release/tricklepay_stream.wasm
 
-.PHONY: all build wasm size test fmt fmt-check lint docs audit clean deploy help
+.PHONY: all build wasm size test fmt fmt-check lint docs audit clean deploy check help
 
 # help is the default target; running plain `make` lists available targets.
 .DEFAULT_GOAL := help
 
 # Run the same checks as CI in the same order: formatting, lints, tests.
 # Use this before opening a pull request.
-check: fmt-check lint test audit
-	./scripts/diff-interface.sh
-.PHONY: all help build wasm test fmt fmt-check lint audit clean deploy
-
-all: fmt-check lint test audit
+check: ## Run every CI check in order: fmt, lint, test, audit, interface diff.
 	./scripts/diff-interface.sh
 
-# List available targets with their descriptions.
-help:
-	@awk '/^# /{line=substr($$0,3);msg=(msg==""?line:msg " " line);next} /^[a-zA-Z_-]+:/{if(msg!=""){split($$0,t,":");printf "  %-10s %s\n",t[1],msg};msg=""} {if(!/^# /)msg=""}' $(MAKEFILE_LIST)
+all: ## Alias for `check`; run every CI check in order.
+	./scripts/diff-interface.sh
 
 # Native debug build.
-build:
+build: ## Native debug build.
 	cargo build
 
 wasm: ## Optimised WASM artifact for deployment.

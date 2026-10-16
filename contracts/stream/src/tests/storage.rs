@@ -208,6 +208,38 @@ fn reading_a_stream_above_the_threshold_leaves_the_ttl_alone() {
     assert_eq!(t.stream_ttl(id), ENTRY_TTL - elapsed);
 }
 
+/// Issue #433: the module docs used to claim a 24-day touch cadence kept a
+/// stream alive. It does not. A touch only re-extends an entry when fewer than
+/// `BUMP_THRESHOLD` ledgers remain; a cadence shorter than that but longer than
+/// `ENTRY_TTL - BUMP_THRESHOLD` lands above the threshold every time, so the
+/// countdown is untouched and the entry expires on its original schedule.
+#[test]
+fn a_touch_above_the_threshold_does_not_postpone_expiry() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.open_default_stream(1_000);
+
+    // Twenty days ≈ 345_600 ledgers at a five-second close, which is closer
+    // together than the old "24-day window" advice and still leaves ~172_800
+    // ledgers, well above `BUMP_THRESHOLD`.
+    let twenty_days = 345_600;
+    t.set_sequence(twenty_days);
+    let remaining = t.stream_ttl(id);
+    assert_eq!(remaining, ENTRY_TTL - twenty_days);
+    assert!(remaining > BUMP_THRESHOLD);
+
+    // The touch is a no-op: the countdown is exactly what it was before.
+    t.contract.get_stream(&id);
+    assert_eq!(t.stream_ttl(id), remaining);
+
+    // Only once the remaining life falls below the threshold does a touch
+    // reset it — the guarantee the docs now state.
+    t.set_sequence(ENTRY_TTL - BUMP_THRESHOLD + 1);
+    assert!(t.stream_ttl(id) < BUMP_THRESHOLD);
+    t.contract.get_stream(&id);
+    assert_eq!(t.stream_ttl(id), ENTRY_TTL);
+}
+
 /// Withdrawing restores a decayed stream entry TTL.
 #[test]
 fn withdrawing_restores_a_decayed_stream_ttl() {

@@ -25,8 +25,10 @@
 //! **`Stream(id)`** entries live in *persistent* storage, one per stream,
 //! keyed by the numeric id. Each entry holds the full [`crate::types::Stream`]
 //! struct: participants, token, schedule, withdrawn amount, and cancelled flag.
-//! The entry is extended on every read or write, so any contact with a stream
-//! resets its countdown. Ids are never reused.
+//! The entry is re-extended on a read or write only when fewer than
+//! [`BUMP_THRESHOLD`] ledgers remain, so the countdown resets when a touch
+//! lands inside the entry's final window — not on every access. Ids are never
+//! reused.
 //!
 //! # Lifetimes
 //!
@@ -39,10 +41,16 @@
 //!   below this mark, so a frequently accessed entry is not charged for a bump
 //!   on every call.
 //!
-//! A stream touched at least once per 24-day window will never approach
-//! archival. A stream that is abandoned for longer than `ENTRY_TTL` ledgers
-//! will be archived by the network; it must be restored off-chain before the
-//! contract can use it again.
+//! Because an access re-extends an entry only while fewer than
+//! [`BUMP_THRESHOLD`] ledgers remain, a touch above the threshold is a no-op,
+//! not a renewal: reading a stream that still has, say, twenty days of life
+//! left does nothing to postpone its expiry. The guarantee that follows from
+//! the constants is therefore **an access at least once per [`BUMP_THRESHOLD`]
+//! ledgers (≈ 6 days)**, so that some touch always lands inside the final
+//! `BUMP_THRESHOLD`-ledger window before the entry would expire and resets it
+//! to [`ENTRY_TTL`]. A stream that is abandoned for longer than `ENTRY_TTL`
+//! ledgers will be archived by the network; it must be restored off-chain
+//! before the contract can use it again.
 
 use soroban_sdk::{contracttype, Env};
 
@@ -53,18 +61,21 @@ use crate::types::Stream;
 /// Derived from a target of thirty days at the nominal five second ledger
 /// close time: `30 days * 86_400 s/day / 5 s/ledger = 518_400` ledgers. Close
 /// times drift, so the wall-clock lifetime is approximate; slower ledgers
-/// stretch it and faster ones shorten it. Thirty days covers a monthly payroll
-/// or subscription cycle, so a stream that is touched at least once per cycle
-/// never approaches archival.
+/// stretch it and faster ones shorten it. Thirty days spans a monthly payroll
+/// or subscription cycle, but a monthly touch is *not* frequent enough to keep
+/// an entry alive: an access only re-extends it when fewer than
+/// [`BUMP_THRESHOLD`] ledgers remain, so the stream must be accessed at least
+/// that often (see the module-level lifetime notes).
 pub(crate) const ENTRY_TTL: u32 = 518_400;
 /// When an accessed entry has fewer than this many ledgers left, extend it
 /// back up to `ENTRY_TTL`. Above this mark an access is a no-op, so an entry
 /// touched often does not pay to be re-extended on every read.
 ///
 /// Set to one fifth of `ENTRY_TTL`, `518_400 / 5 = 103_680` ledgers, or about
-/// six days at five seconds per ledger. An entry is therefore re-extended at
-/// most about once every twenty-four days of activity, and never has less than
-/// six days of headroom left after being touched.
+/// six days at five seconds per ledger. Because an access is only effective
+/// while fewer than this many ledgers remain, a stream survives as long as it
+/// is accessed at least once per `BUMP_THRESHOLD` ledgers; accesses made while
+/// more than the threshold remains are no-ops that do not postpone expiry.
 pub(crate) const BUMP_THRESHOLD: u32 = 103_680;
 
 /// Keys for entries the contract keeps in storage.
@@ -86,11 +97,14 @@ pub enum DataKey {
     ///
     /// Stored in **persistent** storage. Each entry holds the full [`Stream`]
     /// struct — participants, token, schedule, withdrawn amount, and cancelled
-    /// flag — for one stream. The entry is extended to [`ENTRY_TTL`] ledgers
-    /// whenever it is read or written, so any view or mutating call on a stream
-    /// resets its countdown. A stream that is never touched for longer than
-    /// [`ENTRY_TTL`] ledgers will be archived by the network and must be
-    /// restored off-contract before it can be used again.
+    /// flag — for one stream. A read or write re-extends the entry to
+    /// [`ENTRY_TTL`] ledgers only while fewer than [`BUMP_THRESHOLD`] ledgers
+    /// remain; an access above the threshold is a no-op, so the countdown is
+    /// reset by a touch inside the entry's final window rather than by every
+    /// call. The entry therefore stays alive only while it is accessed at least
+    /// once per [`BUMP_THRESHOLD`] ledgers. A stream that is never touched for
+    /// longer than [`ENTRY_TTL`] ledgers will be archived by the network and
+    /// must be restored off-contract before it can be used again.
     Stream(u64),
 }
 

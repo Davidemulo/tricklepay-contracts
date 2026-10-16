@@ -825,6 +825,44 @@ Compute its SHA-256 hash:
 sha256sum target/wasm32v1-none/release/tricklepay_stream.wasm
 ```
 
+### Step 2 — fetch the on-chain bytecode hash
+
+Every contract uploaded to a Stellar network is stored as a Wasm entry keyed
+by the SHA-256 hash of the bytecode. That hash is also recorded in the
+contract's `instance` ledger entry as the `executable` field. Retrieve it with
+the Stellar CLI:
+
+```bash
+# Replace <CONTRACT_ID> with the deployed bech32 contract address and
+# <NETWORK> with "testnet", "mainnet", or a custom RPC URL.
+stellar contract inspect --id <CONTRACT_ID> --network <NETWORK>
+```
+
+The output includes a `wasm_hash` field. This is the SHA-256 hash of the
+bytecode the network is executing.
+
+Alternatively, query the RPC directly:
+
+```bash
+stellar contract fetch --id <CONTRACT_ID> --network <NETWORK> \
+  --out-file fetched.wasm
+sha256sum fetched.wasm
+```
+
+### Step 3 — compare
+
+If the hash from step 1 matches the `wasm_hash` from step 2, the live
+contract was compiled from this exact source tree with the pinned toolchain.
+
+**Caveat — reproducibility:** Rust WASM builds are not guaranteed to be
+bit-for-bit reproducible across different host platforms, OS versions, or LLVM
+releases, even when the same toolchain version is used. In practice, the pinned
+toolchain in `rust-toolchain.toml` makes builds reproducible across Linux
+hosts; macOS or Windows hosts may produce a hash that differs from the deployed
+one even though the source is identical. If hashes do not match, try building
+on a Linux host (or a Docker image with the pinned Rust toolchain) before
+concluding that the deployment differs from the source.
+
 ### Troubleshooting: wrong WASM build target
 
 If deployment or `stellar contract install` fails with a `WasmVm` error about
@@ -953,44 +991,6 @@ Save that `C...` address. It is the `<CONTRACT_ID>` you pass to every later
 [Verifying a deployment](#verifying-a-deployment). Record the deployment details using the [deployment record template](docs/DEPLOYMENT_RECORD_TEMPLATE.md). The script exits non-zero,
 without deploying, if the build fails or the identity is unknown or unfunded.
 
-### Step 2 — fetch the on-chain bytecode hash
-
-Every contract uploaded to a Stellar network is stored as a Wasm entry keyed
-by the SHA-256 hash of the bytecode. That hash is also recorded in the
-contract's `instance` ledger entry as the `executable` field. Retrieve it with
-the Stellar CLI:
-
-```bash
-# Replace <CONTRACT_ID> with the deployed bech32 contract address and
-# <NETWORK> with "testnet", "mainnet", or a custom RPC URL.
-stellar contract inspect --id <CONTRACT_ID> --network <NETWORK>
-```
-
-The output includes a `wasm_hash` field. This is the SHA-256 hash of the
-bytecode the network is executing.
-
-Alternatively, query the RPC directly:
-
-```bash
-stellar contract fetch --id <CONTRACT_ID> --network <NETWORK> \
-  --out-file fetched.wasm
-sha256sum fetched.wasm
-```
-
-### Step 3 — compare
-
-If the hash from step 1 matches the `wasm_hash` from step 2, the live
-contract was compiled from this exact source tree with the pinned toolchain.
-
-**Caveat — reproducibility:** Rust WASM builds are not guaranteed to be
-bit-for-bit reproducible across different host platforms, OS versions, or LLVM
-releases, even when the same toolchain version is used. In practice, the pinned
-toolchain in `rust-toolchain.toml` makes builds reproducible across Linux
-hosts; macOS or Windows hosts may produce a hash that differs from the deployed
-one even though the source is identical. If hashes do not match, try building
-on a Linux host (or a Docker image with the pinned Rust toolchain) before
-concluding that the deployment differs from the source.
-
 ## Project structure
 
 A `cancel` call is rejected with `StreamAlreadyCompleted` if `now >= end_time`
@@ -1075,6 +1075,21 @@ ceiling is rejected with `AmountTooLarge` before any tokens move.
 
 The schedule above divides evenly, so truncation has no visible effect. To see
 it, consider 10 units over 3 seconds, where 10 * 1 / 3 = 3.333… truncates to 3.
+
+## Related repositories
+
+TricklePay is split across companion repositories. This repository holds the
+Soroban `stream` contract; the others are named here for orientation and are
+not linked out to another organization:
+
+- **tricklepay-backend** — the off-chain indexer and API that reads stream state
+  and serves it to clients.
+- **tricklepay-frontend** — the web client that creates, tracks, and withdraws
+  from streams.
+- **tricklepay-docs** — the user- and integrator-facing documentation.
+
+Integrator-facing operational policy for this contract lives in
+[docs/INTEGRATOR_OPERATIONS.md](docs/INTEGRATOR_OPERATIONS.md).
 
 ## Recent Changes
 
