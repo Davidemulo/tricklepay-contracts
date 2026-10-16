@@ -254,6 +254,20 @@ failed and why (insufficient balance, no trustline, a frozen asset, or the
 token contract's own error), resolve that condition, and retry the same
 call: since nothing was committed, retrying is safe and not a double-spend.
 
+**Token errors share StreamError's numeric range.** When a token transfer
+fails, the error surfaces as `Error(Contract, #N)` with the token contract's
+error number, which may collide with this contract's own `StreamError` codes.
+For example, the Stellar Asset Contract's `BalanceError` is `10`, the same as
+this contract's `AmountTooLarge`; its `OverflowError` is `12`, the same as
+`StreamCountExhausted`; and its `TrustlineMissingError` is `13`, the same as
+`InvalidParticipant`. A client that maps error numbers to messages using only
+the `StreamError` table will show the wrong message for a token failure. To
+distinguish them, check the failing contract's address in the diagnostic
+events: if it matches this stream contract, use the `StreamError` table; if it
+matches the token passed to `create_stream`, use that token's own error table.
+See `contracts/stream/src/error.rs` for the full list of known collisions with
+the Stellar Asset Contract.
+
 ## Out-of-scope risks
 
 The following risks exist but are outside the scope of this contract:

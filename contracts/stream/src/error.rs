@@ -13,6 +13,42 @@ use soroban_sdk::contracterror;
 /// nothing ever constructed; it is retired and must not be reused, which is
 /// why the codes below skip it rather than close the gap.
 ///
+/// # Token contract error collisions
+///
+/// **Token transfer failures share the same numeric range as `StreamError`
+/// and produce overlapping error codes.** When a token `transfer` fails — for
+/// example, insufficient balance, a missing trustline, or the token contract's
+/// own limit checks — the failure surfaces as `Error(Contract, #N)` with the
+/// **token contract's** error number, not one of these variants. Because error
+/// numbers are independently assigned by each contract, the same integer can
+/// mean different things depending on which contract returned it:
+///
+/// - **`AmountTooLarge` (10) vs. Stellar Asset Contract `BalanceError` (10)**:
+///   This contract returns `10` when `total_amount` exceeds [`MAX_AMOUNT`](crate::contract::MAX_AMOUNT)
+///   at stream creation. The Stellar Asset Contract (SAC) returns `10` for an
+///   insufficient balance during transfer. A failed `withdraw` showing
+///   `Error(Contract, 10)` is the SAC's `BalanceError`, not
+///   `StreamError::AmountTooLarge` — the stream contract never constructs
+///   `AmountTooLarge` during withdrawal, only during creation.
+/// - **`StreamCountExhausted` (12) vs. SAC `OverflowError` (12)**: A creation
+///   that hits the id counter limit returns `12` from this contract. A token
+///   transfer arithmetic overflow returns `12` from the SAC. The failing
+///   contract address in the diagnostic events distinguishes them.
+/// - **`InvalidParticipant` (13) vs. SAC `TrustlineMissingError` (13)**: This
+///   contract returns `13` when the contract's own address appears as a
+///   participant. The SAC returns `13` for a missing trustline.
+///
+/// **How to tell them apart:** Check the **failing contract address** in the
+/// transaction's diagnostic events. If the address matches this stream
+/// contract, the number maps to the `StreamError` table below. If it matches
+/// the token contract passed to `create_stream`, map it using that token's own
+/// error table — for the Stellar Asset Contract, that is the `stellar_asset_contract`
+/// SDK crate's error types.
+///
+/// Clients that display error messages to users should use the failing contract
+/// address to decide which error table applies, rather than assuming every
+/// numeric code comes from this contract.
+///
 /// # Interface stability
 ///
 /// Every discriminant below is written out explicitly and is part of the

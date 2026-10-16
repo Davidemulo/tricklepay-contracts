@@ -174,6 +174,17 @@ impl StreamContract {
     /// vested up to the current ledger time minus what was withdrawn before.
     /// Returns the amount transferred.
     ///
+    /// # Rejections and Error Behavior
+    ///
+    /// - Returns [`StreamError::StreamNotFound`] if `id` does not exist in storage.
+    /// - Returns [`StreamError::NothingToWithdraw`] if the withdrawable balance is zero
+    ///   (nothing has vested yet, or everything vested has already been withdrawn).
+    ///
+    /// Unlike [`Self::withdraw_amount`], this function never returns
+    /// [`StreamError::InvalidAmount`] or [`StreamError::InsufficientBalance`]
+    /// because it always attempts to withdraw the full available balance
+    /// rather than a caller-specified amount.
+    ///
     /// # Examples
     ///
     /// ```ignore
@@ -195,6 +206,19 @@ impl StreamContract {
     /// useful for drawing a fixed sum or leaving a buffer in the stream. Fails
     /// if the requested amount exceeds the currently withdrawable balance.
     /// Returns the amount transferred.
+    ///
+    /// # Rejections and Error Behavior
+    ///
+    /// - Returns [`StreamError::StreamNotFound`] if `id` does not exist in storage.
+    /// - Returns [`StreamError::InvalidAmount`] if `amount` is zero or negative.
+    /// - Returns [`StreamError::InsufficientBalance`] if `amount` exceeds the
+    ///   withdrawable balance (whatever has vested minus what was already withdrawn).
+    ///
+    /// Unlike [`Self::withdraw`], this function never returns
+    /// [`StreamError::NothingToWithdraw`]. When the withdrawable balance is zero,
+    /// any positive `amount` triggers [`StreamError::InsufficientBalance`] instead,
+    /// and a non-positive `amount` triggers [`StreamError::InvalidAmount`] before
+    /// the balance is even checked.
     ///
     /// # Examples
     ///
@@ -219,6 +243,19 @@ impl StreamContract {
     /// ledger time stays claimable by the recipient through [`Self::withdraw`];
     /// the rest is returned to the sender. Once cancelled, no further tokens
     /// vest. Returns the amount refunded to the sender.
+    ///
+    /// # Rejections and Error Behavior
+    ///
+    /// The following checks run in order after the sender's authorization is
+    /// verified. The first failure encountered determines the error returned:
+    ///
+    /// 1. Returns [`StreamError::StreamNotFound`] if `id` does not exist in storage.
+    /// 2. Returns [`StreamError::AlreadyCancelled`] if the stream has already been cancelled.
+    /// 3. Returns [`StreamError::StreamAlreadyCompleted`] if the current ledger time
+    ///    is at or past `end_time` — a fully vested stream has nothing unvested to refund.
+    ///
+    /// If all checks pass, the stream is frozen at the vested amount and the unvested
+    /// remainder is refunded to the sender.
     ///
     /// # Examples
     ///
