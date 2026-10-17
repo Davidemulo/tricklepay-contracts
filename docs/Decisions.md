@@ -20,7 +20,7 @@ client-side, which is O(every stream ever created on the deployment) and gets
 slower with every new stream, regardless of how many belong to the party
 asking.
 
-This gap is deliberate, not an oversight. `Created`, `Withdrawn`, and
+This gap is deliberate actually, not an oversight. `Created`, `Withdrawn`, and
 `Cancelled` all index `sender` and/or `recipient` as event topics specifically
 so an off-chain consumer can answer this query without the contract doing it
 (see [README.md § Events](../README.md#events)); the indexer and web client
