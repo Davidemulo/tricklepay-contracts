@@ -22,3 +22,8 @@ proptest = "1.4"
 version = "0.1.0" # (or your current workspace version)
 rust-version = "1.82.0" # Replace with the exact version specified in rust-toolchain.toml
 edition = "2021"
+
+[workspace.dependencies]
+# Pinned to an exact version to ensure deterministic compilation, reproducible builds,
+# and verified WASM hash integrity across deployments and audits.
+soroban-sdk = "20.5.0" # or whichever exact version your workspace uses
