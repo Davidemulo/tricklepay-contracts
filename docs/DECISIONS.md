@@ -20,7 +20,7 @@ client-side, which is O(every stream ever created on the deployment) and gets
 slower with every new stream, regardless of how many belong to the party
 asking.
 
-This gap is deliberate, not an oversight. `Created`, `Withdrawn`, and
+This gap is deliberate actually, not an oversight. `Created`, `Withdrawn`, and
 `Cancelled` all index `sender` and/or `recipient` as event topics specifically
 so an off-chain consumer can answer this query without the contract doing it
 (see [README.md § Events](../README.md#events)); the indexer and web client
@@ -91,3 +91,33 @@ address-to-stream-id mapping from their topics. The contract exposes no
   [docs/INTEGRATOR_OPERATIONS.md § Interface Stability Policy](INTEGRATOR_OPERATIONS.md#interface-stability-policy).
 - Until one of those is true, this decision stands: enumeration by party is a
   client/indexer concern, not a contract concern.
+
+
+## ADR: Immutable Architecture with No Admin or Initializer
+
+- **Status**: Accepted
+- **Context**: Smart contract protocols often introduce administrative keys, upgrade proxies, or initialization functions to allow pausing, parameter tuning, or code updates post-deployment. However, administrative privileges introduce critical centralization risks, single points of failure, and high-value target attack surfaces for private key compromise or malicious governance takeovers.
+- **Decision**: The TricklePay smart contract architecture is strictly immutable, featuring **no admin role, no owner account, and no `initialize` function**. All contract behavior is fully deterministic and hardcoded upon deployment.
+- **Consequences**:
+  - **Upgrades**: The deployed contract cannot be upgraded in place. Any logic updates require deploying a brand-new contract instance and handling client-side migration.
+  - **Pausing**: There is no emergency pause mechanism. Risk mitigation relies entirely on pre-deployment audit rigor and robust client-side validation.
+  - **Recovery**: Administrative fund rescue or asset recovery functions do not exist; misdirected or locked funds cannot be arbitrarily withdrawn by any party.
+- **Related References**: 
+  - See the [Audit Readiness Threat Model](../docs/AUDIT_READINESS.md#threat-model) for central privilege risk assessments and trust assumption boundaries.
+
+  ## ADR: Linear-Only Vesting Release Curve
+
+- **Status**: Accepted
+- **Context**: Vesting and token streaming protocols require a mathematical formula to calculate unlocked token amounts over time. While complex release curves (such as exponential, logarithmic, or S-curves) are used in some financial contexts, TricklePay's initial design requires a predictable, transparent, and computationally lightweight mechanism.
+- **Decision**: Restrict the smart contract vesting logic to strictly **linear release curves** following an optional cliff period.
+- **Rationale**:
+  - **Simplicity & Predictability**: Linear vesting is easily understood by beneficiaries and integrators without requiring complex mathematical tooling.
+  - **Gas & Compute Efficiency**: Linear calculations require minimal arithmetic operations, optimizing Soroban CPU and memory footprint.
+  - **Auditability**: Straightforward formulas significantly reduce potential edge cases and rounding bugs during audits.
+- **Impact of Introducing Alternative Curves**:
+  If future development introduces non-linear curves (as noted in the [Roadmap](../README.md#roadmap)), the following changes will be required:
+  - **Interface / ABI**: Stream creation functions must be refactored to accept curve type enums and curve-specific parameters/coefficients.
+  - **Events**: Stream initialization events must emit curve metadata so off-chain indexers know which mathematical model applies.
+  - **View Functions**: Calculations in `vested_amount` and `claimable_amount` will require dynamic branching or modular curve evaluation functions rather than direct linear interpolation.
+- **Related References**:
+  - See the roadmap item for future vesting curve flexibility.
