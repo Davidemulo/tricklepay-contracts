@@ -147,4 +147,18 @@ address-to-stream-id mapping from their topics. The contract exposes no
   - **Granularity Limits**: Time calculations are precise to the ledger close interval (~5 seconds) rather than wall-clock milliseconds.
 - **Related References**:
   - See the detailed discussion on clock precision and assumptions in the [Time and Ledger Clock section of the README](../README.md#time-and-ledger-clock).
+
+
+  ## ADR: `i128` Amount Type and `i64::MAX` Stream Amount Ceiling
+
+- **Status**: Accepted
+- **Context**: Soroban token interfaces utilize `i128` data types for token balances and transfers to support high-precision assets. However, calculating linear vesting streams requires multiplying total amounts by elapsed time and duration intervals, which creates potential integer overflow vectors during arithmetic operations.
+- **Decision**: Token amounts are stored and processed as `i128` for complete compatibility with the Stellar / Soroban token standard, but `create_stream` strictly enforces an upper limit capped at `i64::MAX` for individual stream allocations.
+- **Consequences**:
+  - **Arithmetic Safety**: Capping individual streams at `i64::MAX` guarantees that intermediate multiplication steps during vesting calculations cannot overflow standard integer boundaries.
+  - **Largest Streamable Amount**: The maximum amount streamable in a single contract instance is `i64::MAX` (approximately $9.22 \times 10^{18}$ base units).
+  - **Exclusions**: Assets with astronomical token supplies or extreme decimal precision exceeding `i64::MAX` cannot be streamed in a single stream instance and must be split across multiple streams if necessary.
+- **Related References**:
+  - See the detailed discussion in the [Amount Ceiling section of the README](../README.md#amount-ceiling).
+
   
