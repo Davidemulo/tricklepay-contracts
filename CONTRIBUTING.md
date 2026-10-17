@@ -54,6 +54,9 @@ If you intentionally changed the contract interface, update the snapshot before 
 make wasm
 stellar contract inspect --wasm target/wasm32v1-none/release/tricklepay_stream.wasm > docs/interface.txt
 ```
+The equivalent target is `make snapshot`. Run `make check-markdown-links` when
+changing documentation, and use `make verify-deployment CONTRACT_ID=C... NETWORK=testnet`
+to compare a deployment with the local build.
 
 ## Testing
 
