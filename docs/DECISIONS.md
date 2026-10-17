@@ -121,3 +121,44 @@ address-to-stream-id mapping from their topics. The contract exposes no
   - **View Functions**: Calculations in `vested_amount` and `claimable_amount` will require dynamic branching or modular curve evaluation functions rather than direct linear interpolation.
 - **Related References**:
   - See the roadmap item for future vesting curve flexibility.
+
+  ## ADR: On-Demand Derived Stream Status
+
+- **Status**: Accepted
+- **Context**: Streaming and payment contracts track state transitions across a stream's lifecycle (e.g., `Pending`, `Active`, `Completed`, or `Cancelled`). Storing explicit state values on-chain requires state-transition transactions (or cron/keeper bots) to push state changes as time advances past start/end thresholds, introducing unnecessary gas costs and transaction overhead.
+- **Decision**: Stream status is **dynamically derived on every call** directly from the current ledger timestamp (`env.ledger().timestamp()`) relative to the stream's `start_time` and `end_time`. Stream status is never stored as persistent state on-chain.
+- **Consequences**:
+  - **Zero Transaction Overhead**: Streams transition between lifecycle states (e.g., from `Pending` to `Active` to `Completed`) seamlessly without requiring explicit state-transition transactions or maintenance calls.
+  - **Storage & Gas Optimization**: Eliminates on-chain storage reads/writes for status updates, reducing overall ledger footprint and transaction gas fees.
+  - **Impact on Indexers and Clients**: Off-chain indexers, UI frontends, and client SDKs cannot simply read a static status field from contract storage. Instead, they must mirror the contract's status calculation logic using the stream's temporal parameters and the latest ledger header timestamp.
+- **Related References**:
+  - See the status calculation logic in the [Status Module](../contracts/tricklepay/src/types.rs).x
+
+  ## ADR: Ledger Timestamp as the Canonical Clock
+
+- **Status**: Accepted
+- **Context**: Time-dependent financial vesting and token streaming require a reliable, tamper-proof source of time within the smart contract environment. Smart contract platforms generally offer two primary mechanisms: block/ledger sequence numbers or network ledger timestamps.
+- **Decision**: Use `env.ledger().timestamp()` as the canonical source of time for all vesting calculations, stream start/end thresholds, and rate evaluations.
+- **Alternative Considered & Rejected**: 
+  - *Ledger Sequence Numbers*: Using discrete ledger count increments as a proxy for time passing.
+  - *Why it was rejected*: Ledger sequences do not map intuitively to real-world calendar time or human expectations (e.g., scheduling a stream to unlock on a specific date versus calculating exact ledger heights). Furthermore, ledger close times on Stellar are highly stable (~5 seconds per ledger), making wall-clock timestamps superior for predictability. While ledger timestamps are bounded by ledger close resolution rather than continuous sub-second precision, they provide an ideal balance of auditability and real-world utility.
+- **Consequences**:
+  - **Intuitive Scheduling**: Vesting cliffs and durations align directly with Unix epoch timestamps, making client integration and user comprehension straightforward.
+  - **Granularity Limits**: Time calculations are precise to the ledger close interval (~5 seconds) rather than wall-clock milliseconds.
+- **Related References**:
+  - See the detailed discussion on clock precision and assumptions in the [Time and Ledger Clock section of the README](../README.md#time-and-ledger-clock).
+
+
+  ## ADR: `i128` Amount Type and `i64::MAX` Stream Amount Ceiling
+
+- **Status**: Accepted
+- **Context**: Soroban token interfaces utilize `i128` data types for token balances and transfers to support high-precision assets. However, calculating linear vesting streams requires multiplying total amounts by elapsed time and duration intervals, which creates potential integer overflow vectors during arithmetic operations.
+- **Decision**: Token amounts are stored and processed as `i128` for complete compatibility with the Stellar / Soroban token standard, but `create_stream` strictly enforces an upper limit capped at `i64::MAX` for individual stream allocations.
+- **Consequences**:
+  - **Arithmetic Safety**: Capping individual streams at `i64::MAX` guarantees that intermediate multiplication steps during vesting calculations cannot overflow standard integer boundaries.
+  - **Largest Streamable Amount**: The maximum amount streamable in a single contract instance is `i64::MAX` (approximately $9.22 \times 10^{18}$ base units).
+  - **Exclusions**: Assets with astronomical token supplies or extreme decimal precision exceeding `i64::MAX` cannot be streamed in a single stream instance and must be split across multiple streams if necessary.
+- **Related References**:
+  - See the detailed discussion in the [Amount Ceiling section of the README](../README.md#amount-ceiling).
+
+  
