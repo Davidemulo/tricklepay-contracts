@@ -901,6 +901,12 @@ sha256sum fetched.wasm
 If the hash from step 1 matches the `wasm_hash` from step 2, the live
 contract was compiled from this exact source tree with the pinned toolchain.
 
+The same comparison can be run with one command:
+
+```bash
+make verify-deployment CONTRACT_ID=C... NETWORK=testnet
+```
+
 **Caveat — reproducibility:** Rust WASM builds are not guaranteed to be
 bit-for-bit reproducible across different host platforms, OS versions, or LLVM
 releases, even when the same toolchain version is used. In practice, the pinned

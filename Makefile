@@ -3,7 +3,7 @@
 WASM_TARGET := wasm32v1-none
 WASM := target/$(WASM_TARGET)/release/tricklepay_stream.wasm
 
-.PHONY: all build wasm size test fmt fmt-check lint docs audit clean deploy check help
+.PHONY: all build wasm size test fmt fmt-check lint docs audit clean deploy verify-deployment check-markdown-links snapshot check help
 
 # help is the default target; running plain `make` lists available targets.
 .DEFAULT_GOAL := help
@@ -15,6 +15,16 @@ check: ## Run every CI check in order: fmt, lint, test, audit, interface diff.
 
 all: ## Alias for `check`; run every CI check in order.
 	./scripts/diff-interface.sh
+
+verify-deployment: ## Compare a deployed contract's WASM with a local build.
+	@if [ -z "$(CONTRACT_ID)" ] || [ -z "$(NETWORK)" ]; then echo "Usage: make verify-deployment CONTRACT_ID=C... NETWORK=testnet"; exit 2; fi
+	./scripts/verify-deployment.sh "$(CONTRACT_ID)" "$(NETWORK)"
+
+check-markdown-links: ## Check relative Markdown files and heading anchors.
+	python3 scripts/check-markdown-links.py
+
+snapshot: wasm ## Regenerate the checked-in contract interface snapshot.
+	stellar contract inspect --wasm $(WASM) > docs/interface.txt
 
 # Native debug build.
 build: ## Native debug build.
