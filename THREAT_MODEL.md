@@ -331,6 +331,65 @@ None of these mitigations are built into the contract. The responsibility for ke
 
 **Compatibility note:** Changing this decision would alter the operational cost profile for every high-frequency contract. It would not break the interface signature, but it would increase the gas cost and execution time for every withdrawal and cancellation call. The decision to extend only on `create_stream` is locked in as part of the contract's deployed behavior. The pinning test exists to prevent accidental changes during refactoring.
 
+### Decision: permissionless stream TTL extension entry point
+
+**A public `extend_stream_ttl(id)` entry point is not added to the contract.**
+
+**The problem:** A stream that nobody touches for `ENTRY_TTL` (518,400 ledgers, roughly thirty days) is archived and must be restored before use. Any view call (`get_stream`, `withdrawable`, `vested`, etc.) or mutating call (`withdraw`, `cancel`) extends the stream's TTL, but if the recipient of a long vesting schedule (e.g., a two-year grant) never checks the stream for more than thirty days, it expires. Once expired, the next `withdraw` or `get_stream` call fails with a host storage error until someone submits an off-chain Soroban restore transaction. The recipient, or anyone else who cares about keeping the stream alive, would like a cheap way to extend its TTL without performing a full withdraw or view operation.
+
+**Proposed entry point:**
+
+```rust
+pub fn extend_stream_ttl(env: Env, id: u64) -> Result<(), StreamError> {
+    let stream = storage::get_stream(&env, id)?;
+    storage::extend_stream_ttl(&env, id);
+    Ok(())
+}
+```
+
+This would be a permissionless call (no `require_auth()`) that anyone can invoke for any stream. It reads the stream to confirm it exists (returning `StreamError::StreamNotFound` if not), then calls `storage::extend_stream_ttl(&env, id)` to bump the stream's TTL back to `ENTRY_TTL` if it has decayed below `BUMP_THRESHOLD`. It performs no token transfer, no balance update, and no state change beyond the TTL extension itself.
+
+**Cost:** One cross-contract call overhead (roughly 0.1–0.2 ms), one persistent storage read (`DataKey::Stream(id)`), and one conditional TTL write if below the bump threshold (the same cost as any other TTL bump, roughly 0.1–0.3 ms and a small storage fee). The caller pays the ledger read and write fees. For a single stream, this is cheaper than calling `get_stream` (which also reads the stream but then serializes and returns the full record to the caller) and far cheaper than a `withdraw` (which does all of that plus a token transfer).
+
+**Abuse potential:** Because the entry point is permissionless, anyone can call it for any stream. The abuse scenarios are:
+
+1. **Spam:** A malicious caller could invoke `extend_stream_ttl` for every stream id from `0` to `stream_count - 1` in a loop, forcing the contract to read and bump every stream's TTL whether it needs it or not. The caller pays the ledger fees, so this is a griefing attack rather than a free exploit, but it does consume network resources and could be used to bloat transaction history or exhaust a caller's fee budget in a denial-of-service pattern.
+
+2. **Unwanted extension:** A recipient who wants their stream to expire (perhaps because they prefer it archived so the sender cannot cancel it, or because they want to avoid being tracked by periodic on-chain activity) cannot prevent a third party from keeping it alive. The permissionless nature removes recipient agency over the stream's archival state.
+
+3. **No additional security risk:** The entry point cannot move tokens, cannot alter `withdrawn` or `total_amount`, and cannot change `sender`, `recipient`, or the schedule. It is purely a TTL management operation. An attacker calling it cannot drain, freeze, or hijack a stream; they can only keep it accessible longer than it would otherwise remain.
+
+The first concern (spam) is the primary abuse vector. A determined griefer with sufficient fees could force-extend thousands of streams, but they gain nothing from it except making those streams stay alive longer, which is arguably neutral or even beneficial to the participants. The cost is paid by the attacker, not by the contract or its users.
+
+**Benefit:** Recipients of long-vesting streams (multi-month or multi-year schedules) can keep their streams alive cheaply without having to withdraw early or query them solely for TTL-bumping purposes. A recipient who does not need funds for six months but wants the stream to remain accessible can call `extend_stream_ttl` once every few weeks at minimal cost instead of calling `withdrawable` or `get_stream` (which return data they do not need) or performing a zero-value withdrawal (which is not supported — `withdraw_amount(0)` returns `InvalidAmount`).
+
+Third parties — such as an indexer service that tracks streams on behalf of users, or a grant administrator monitoring vesting schedules — can also call `extend_stream_ttl` to keep streams alive on behalf of participants who may not know the stream is about to expire. This is useful for non-technical recipients who do not monitor ledger state directly.
+
+**Alternative: extend on every read call:** Instead of adding a dedicated entry point, modify `get_stream`, `withdrawable`, `vested`, `locked`, `progress`, and `status` to call `storage::extend_stream_ttl(&env, id)` before returning. This would make every read call bump the stream's TTL as a side effect, ensuring that any periodic query (e.g., an indexer checking `vested` every hour) keeps the stream alive without the need for a dedicated extension call.
+
+Cost: The same conditional TTL write on every read call. The operational cost is identical to the proposed `extend_stream_ttl`, but the extension is implicit rather than explicit. The downside is that read calls would now perform a write as a side effect, which could surprise integrators who assume view calls are read-only and have no ledger-write cost.
+
+**Decision rationale:** A permissionless `extend_stream_ttl(id)` entry point is **not added**. The benefit — allowing recipients and third parties to keep streams alive cheaply — is outweighed by the interface expansion and the abuse potential (spam and unwanted extension). The existing workaround is sufficient: any party who wants to keep a stream alive can call `get_stream(id)` or `withdrawable(id)` periodically (the TTL bump happens automatically as a side effect of reading the persistent entry), and the cost difference between that and a dedicated `extend_stream_ttl` call is small (a few milliseconds and a negligible fee for serializing the stream record).
+
+Adding a new entry point increases the contract's API surface, requires additional testing (permissionless call semantics, interaction with archived streams, behavior across the full id range), and introduces the spam vector described above. The cost-benefit trade-off does not favor it. Recipients who hold long-vesting streams are expected to check them periodically — any view call is enough — and if a stream does expire, it can be restored via an off-chain transaction. The operational burden is minimal and does not justify a new entry point.
+
+**If this decision were reversed:** A follow-up implementation would require:
+
+1. **Signature:** `pub fn extend_stream_ttl(env: Env, id: u64) -> Result<(), StreamError>` as a new entry point in [`contract.rs`](contracts/stream/src/contract.rs), with no authorization check.
+
+2. **Implementation:** Read the stream with `storage::get_stream(&env, id)?` to confirm it exists, then call `storage::extend_stream_ttl(&env, id)` to bump its TTL. Return `Ok(())` on success, `StreamError::StreamNotFound` if the id does not exist.
+
+3. **Tests:**
+   - Calling `extend_stream_ttl` for a valid stream id extends its TTL to `ENTRY_TTL` if it was below `BUMP_THRESHOLD`.
+   - Calling `extend_stream_ttl` for a stream whose TTL is above `BUMP_THRESHOLD` does not change the TTL (deliberate no-op).
+   - Calling `extend_stream_ttl` for a non-existent id returns `StreamError::StreamNotFound`.
+   - Calling `extend_stream_ttl` does not alter `withdrawn`, `total_amount`, or any other stream field.
+   - Permissionless: no authorization check, so any address can call it for any stream.
+
+4. **Documentation:** Add the entry point to the contract interface table in the README, with "anyone" as the caller and "Extends the stream's TTL to prevent archival" as the description. Add a note to the storage lifetime section in the README and threat model explaining that the entry point exists as a convenience for keeping long-vesting streams alive without performing a withdrawal or full view call.
+
+5. **Changelog:** Mark as a new entry point added in the version where it ships, with a compatibility note that it is permissionless and anyone can invoke it for any stream id.
+
 ## Out-of-scope risks
 
 The following risks exist but are outside the scope of this contract:
