@@ -374,6 +374,180 @@ The stream contract does not enforce any of the above. It calls the token you gi
 
 **When in doubt:** Use a Stellar Asset Contract for a well-known Stellar asset (XLM, USDC, a stablecoin from a recognized issuer) rather than a custom or unknown token. SACs are standardized, have no hooks, and their issuer controls are visible on-chain. Custom tokens are only as safe as their implementation and the deployer's intentions, and the contract cannot tell the difference.
 
+## Distinguishing Stream Errors from Token Errors in Failed Transactions
+
+When a transaction involving the stream contract fails, the error surfaces as a
+contract error number — for example, `Error(Contract, #10)`. Because the stream
+contract invokes the token contract for every transfer operation (`create_stream`,
+`withdraw`, `withdraw_amount`, `cancel`), a failure could come from either
+contract. **Both contracts use overlapping error code ranges,** so the numeric
+code alone does not tell you which contract raised it.
+
+For example:
+- `StreamError::AmountTooLarge` is code `10` in the stream contract.
+- The Stellar Asset Contract's `BalanceError` is also code `10`.
+- `StreamError::StreamCountExhausted` is code `12`; the SAC's `OverflowError` is also `12`.
+- `StreamError::InvalidParticipant` is code `13`; the SAC's `TrustlineMissingError` is also `13`.
+
+A client that maps error numbers to messages using only the `StreamError` table
+will show the wrong message for a token failure, and vice versa. **To
+distinguish them, check which contract address appears in the diagnostic events
+for the failed call.**
+
+### How diagnostic events work
+
+When a Soroban contract call fails, the Stellar RPC includes diagnostic events
+in the simulation or transaction result. These events contain structured
+metadata about what happened during execution, including:
+- Which contract was invoked at each step.
+- The function name that was called.
+- The error that was raised, along with the contract address that raised it.
+
+**The key piece of information is the contract address in the error event.** If
+it matches the stream contract's address, the error is a `StreamError`. If it
+matches the token address passed to `create_stream`, the error is from the
+token contract, and you must use that token's error table to decode it.
+
+### Worked example 1: A stream error (`StreamError::NothingToWithdraw`)
+
+**Scenario:** A recipient calls `withdraw` on a stream before `start_time`, when
+nothing has vested yet.
+
+**What the transaction looks like:**
+```json
+{
+  "status": "FAILED",
+  "error": "Error(Contract, #7)"
+}
+```
+
+**Diagnostic events excerpt:**
+```json
+{
+  "events": [
+    {
+      "type": "diagnostic",
+      "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",  // stream contract address
+      "topics": [
+        "error",
+        "withdraw"
+      ],
+      "data": {
+        "error": "Error(Contract, #7)"
+      }
+    }
+  ]
+}
+```
+
+**How to interpret:** The `contract` field in the error event is the stream
+contract's address. Error code `7` is `StreamError::NothingToWithdraw`. The
+message for the user is: "Nothing available to withdraw yet" (see
+[Withdrawing Before Anything Has Vested](#withdrawing-before-anything-has-vested)).
+The failure came from the stream contract's own logic — no token call was
+involved.
+
+### Worked example 2: A token error (Stellar Asset Contract `TrustlineMissingError`)
+
+**Scenario:** A sender calls `withdraw` on a stream, but the recipient does not
+have a trustline for the streamed asset.
+
+**What the transaction looks like:**
+```json
+{
+  "status": "FAILED",
+  "error": "Error(Contract, #13)"
+}
+```
+
+**Diagnostic events excerpt:**
+```json
+{
+  "events": [
+    {
+      "type": "diagnostic",
+      "contract": "CBQHNAXSI55GX2GN6D67GK7BHVPSLJUGZQEU7WJ5LKR5PNUCGLIMAO4K",  // token contract address
+      "topics": [
+        "error",
+        "transfer"
+      ],
+      "data": {
+        "error": "Error(Contract, #13)"
+      }
+    }
+  ]
+}
+```
+
+**How to interpret:** The `contract` field in the error event is the token
+contract's address — the `token: Address` that was passed to `create_stream`,
+not the stream contract itself. Error code `13` from a Stellar Asset Contract
+is `TrustlineMissingError`. The message for the user is: "The recipient does
+not have a trustline for this asset. They must establish a trustline before
+withdrawing." (See [Token Due Diligence Checklist § All required trustlines are
+in place](#5-all-required-trustlines-are-in-place).) The failure came from the
+token's `transfer` call, which the stream contract invoked but did not cause.
+
+If code `13` had instead come from the stream contract's address, it would be
+`StreamError::InvalidParticipant` (a different error), and the message would be
+completely wrong.
+
+### When diagnostic events are available
+
+Diagnostic events are included in:
+- **Transaction simulation results** when you call `simulateTransaction` on a
+  Stellar RPC before submitting. This is the recommended way to preview what
+  will happen and catch errors before paying fees.
+- **Failed transaction results** after a transaction has been submitted to the
+  network and applied. The transaction result includes the same diagnostic
+  event structure.
+
+Diagnostic events are **not available** in:
+- Successful transactions by default (they may optionally be included if the
+  RPC is configured to emit them, but most production RPCs do not).
+- Transactions that fail during pre-flight validation (malformed XDR, invalid
+  signature, insufficient balance to pay the base fee) before they reach
+  contract execution. These fail at the Stellar protocol layer, not inside a
+  contract, so no diagnostic events are generated.
+
+If a transaction succeeds, you do not need to parse error events — the result
+carries the returned value, and any `Created`, `Withdrawn`, or `Cancelled`
+event the contract published. If it fails during pre-flight, the error is a
+Stellar protocol error (see [Stellar's transaction result
+codes](https://developers.stellar.org/docs/fundamentals-and-concepts/stellar-data-structures/operations-and-transactions#result-codes)),
+not a contract error.
+
+### Recommended client flow
+
+1. **Before submitting:** Call `simulateTransaction` and check the result. If
+   the simulation fails, inspect the diagnostic events for the failing
+   contract's address and error code. Decode the error using the correct
+   contract's error table (stream contract or token contract) and show the user
+   a specific, actionable message before they pay to submit a transaction that
+   will fail.
+
+2. **After a failed submission:** Read the transaction result's diagnostic
+   events the same way. Match the failing contract address to either the stream
+   or token, decode the error, and present it to the user with context ("This
+   failed because the token transfer could not complete" vs. "This failed
+   because the stream contract rejected the operation").
+
+3. **Collision-safe error decoding:** Never map an error code to a message
+   without first checking which contract raised it. Maintain separate error
+   tables for the stream contract and for every token a stream might use (or at
+   least for the Stellar Asset Contract, which is the most common). If you
+   encounter an error from an unknown contract, show the raw code and contract
+   address rather than guessing.
+
+### Related references
+
+- `contracts/stream/src/error.rs` — full list of `StreamError` codes, including
+  notes on which ones collide with Stellar Asset Contract error numbers.
+- [THREAT_MODEL.md § What happens when a token transfer
+  fails](../THREAT_MODEL.md#what-happens-when-a-token-transfer-fails) — explains
+  that a token transfer failure aborts the entire transaction, not just the
+  transfer, and how to recover.
+
 ## Maximum Practical Stream Duration
 
 The type system permits `u64` Unix-second timestamps, but the practical maximum
