@@ -1,0 +1,98 @@
+#[soroban_sdk::contractargs(name = "Args")]
+#[soroban_sdk::contractclient(name = "Client")]
+pub trait Contract {
+    fn cancel(env: soroban_sdk::Env, id: u64) -> Result<i128, StreamError>;
+    fn locked(env: soroban_sdk::Env, id: u64) -> Result<i128, StreamError>;
+    fn status(env: soroban_sdk::Env, id: u64) -> Result<StreamStatus, StreamError>;
+    fn vested(env: soroban_sdk::Env, id: u64) -> Result<i128, StreamError>;
+    fn progress(env: soroban_sdk::Env, id: u64) -> Result<u32, StreamError>;
+    fn withdraw(env: soroban_sdk::Env, id: u64) -> Result<i128, StreamError>;
+    fn get_stream(env: soroban_sdk::Env, id: u64) -> Result<Stream, StreamError>;
+    fn stream_count(env: soroban_sdk::Env) -> u64;
+    fn withdrawable(env: soroban_sdk::Env, id: u64) -> Result<i128, StreamError>;
+    fn create_stream(
+        env: soroban_sdk::Env,
+        sender: soroban_sdk::Address,
+        recipient: soroban_sdk::Address,
+        token: soroban_sdk::Address,
+        total_amount: i128,
+        start_time: u64,
+        end_time: u64,
+        cliff_time: u64,
+    ) -> Result<u64, StreamError>;
+    fn withdraw_amount(env: soroban_sdk::Env, id: u64, amount: i128) -> Result<i128, StreamError>;
+}
+#[soroban_sdk::contracttype(export = false)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct Stream {
+    pub cancelled: bool,
+    pub cliff_time: u64,
+    pub end_time: u64,
+    pub recipient: soroban_sdk::Address,
+    pub sender: soroban_sdk::Address,
+    pub start_time: u64,
+    pub token: soroban_sdk::Address,
+    pub total_amount: i128,
+    pub withdrawn: i128,
+}
+#[soroban_sdk::contracttype(export = false)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub enum StreamStatus {
+    Pending,
+    Streaming,
+    Completed,
+    Cancelled,
+}
+#[soroban_sdk::contracttype(export = false)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub enum DataKey {
+    StreamCount,
+    Stream(u64),
+}
+#[soroban_sdk::contracterror(export = false)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub enum StreamError {
+    StreamNotFound = 1,
+    InvalidTimeRange = 3,
+    InvalidAmount = 4,
+    InvalidCliff = 5,
+    AlreadyCancelled = 6,
+    NothingToWithdraw = 7,
+    InsufficientBalance = 8,
+    StreamAlreadyCompleted = 9,
+    AmountTooLarge = 10,
+    StreamWindowInPast = 11,
+    StreamCountExhausted = 12,
+    InvalidParticipant = 13,
+}
+# [soroban_sdk :: contractevent (export = false , topics = ["created" ,])]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct Created {
+    #[topic]
+    pub sender: soroban_sdk::Address,
+    #[topic]
+    pub recipient: soroban_sdk::Address,
+    pub id: u64,
+    pub token: soroban_sdk::Address,
+    pub total_amount: i128,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub cliff_time: u64,
+}
+# [soroban_sdk :: contractevent (export = false , topics = ["cancelled" ,])]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct Cancelled {
+    #[topic]
+    pub sender: soroban_sdk::Address,
+    pub id: u64,
+    pub recipient_amount: i128,
+    pub sender_refund: i128,
+}
+# [soroban_sdk :: contractevent (export = false , topics = ["withdrawn" ,])]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct Withdrawn {
+    #[topic]
+    pub recipient: soroban_sdk::Address,
+    pub id: u64,
+    pub amount: i128,
+}

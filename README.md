@@ -405,7 +405,7 @@ cargo build --release --target wasm32v1-none
 Then print the interface with the Stellar CLI:
 
 ```bash
-stellar contract inspect \
+stellar contract info interface \
   --wasm target/wasm32v1-none/release/tricklepay_stream.wasm
 ```
 
@@ -441,15 +441,15 @@ stellar contract fetch \
   --network <NETWORK> \
   --out-file fetched.wasm
 
-stellar contract inspect --wasm fetched.wasm
+stellar contract info interface --wasm fetched.wasm
 ```
 
-Or pass `--id` directly to `inspect` if you only need the interface and do not
+Or pass `--contract-id` directly to `info interface` if you only need the interface and do not
 want to keep the WASM file locally:
 
 ```bash
-stellar contract inspect \
-  --id <CONTRACT_ID> \
+stellar contract info interface \
+  --contract-id <CONTRACT_ID> \
   --network <NETWORK>
 ```
 

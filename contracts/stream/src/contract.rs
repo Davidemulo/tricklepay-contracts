@@ -237,34 +237,6 @@ impl StreamContract {
             }
             Ok(available)
         })
-        let mut stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
-        stream.recipient.require_auth();
-
-        let now = env.ledger().timestamp();
-        let vested = vesting::vested_amount(
-            stream.total_amount,
-            stream.start_time,
-            stream.end_time,
-            stream.cliff_time,
-            now,
-        );
-        let available = vesting::withdrawable_amount(vested, stream.withdrawn);
-        if available <= 0 {
-            return Err(StreamError::NothingToWithdraw);
-        }
-
-        stream.withdrawn += available;
-        storage::set_stream(&env, id, &stream);
-
-        TokenClient::new(&env, &stream.token).transfer(
-            &env.current_contract_address(),
-            &stream.recipient,
-            &available,
-        );
-
-        events::publish_withdrawn(&env, &stream.recipient, id, available);
-
-        Ok(available)
     }
 
     /// Withdraw a specific amount, up to what has vested.
@@ -290,38 +262,6 @@ impl StreamContract {
             }
             Ok(amount)
         })
-        let mut stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
-        stream.recipient.require_auth();
-
-        if amount <= 0 {
-            return Err(StreamError::InvalidAmount);
-        }
-
-        let now = env.ledger().timestamp();
-        let vested = vesting::vested_amount(
-            stream.total_amount,
-            stream.start_time,
-            stream.end_time,
-            stream.cliff_time,
-            now,
-        );
-        let available = vesting::withdrawable_amount(vested, stream.withdrawn);
-        if amount > available {
-            return Err(StreamError::InsufficientBalance);
-        }
-
-        stream.withdrawn += amount;
-        storage::set_stream(&env, id, &stream);
-
-        TokenClient::new(&env, &stream.token).transfer(
-            &env.current_contract_address(),
-            &stream.recipient,
-            &amount,
-        );
-
-        events::publish_withdrawn(&env, &stream.recipient, id, amount);
-
-        Ok(amount)
     }
 
     /// Cancel a stream and refund the unvested remainder to the sender.
@@ -385,7 +325,6 @@ impl StreamContract {
             sender_refund: settlement.refund,
         }
         .publish(&env);
-        events::publish_cancelled(&env, &stream.sender, id, recipient_remaining, refund);
 
         Ok(settlement.refund)
     }
@@ -512,7 +451,8 @@ impl StreamContract {
         );
         let scale = i128::from(BPS_SCALE);
         let progress = vested * scale / stream.total_amount;
-        Ok(u32::try_from(progress.clamp(0, scale)).unwrap_or(0))
+        // The clamp keeps the value in 0..=BPS_SCALE, which always fits in u32.
+        Ok(u32::try_from(progress.clamp(0, scale)).expect("clamped progress fits in u32"))
     }
 
     /// Lifecycle status of a stream at the current ledger time.
