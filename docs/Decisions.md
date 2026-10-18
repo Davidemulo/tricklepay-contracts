@@ -272,6 +272,127 @@ or how long it takes the recipient to withdraw.
   escrow never exceeds its `total_amount`", the property that guarantees the
   deposit at creation is sufficient for the stream's entire life.
 
+## ADR: Self-Streams Are Allowed (sender == recipient)
+
+**Status:** Accepted
+
+### Context
+
+`create_stream` accepts a `sender` and a `recipient` address with no
+relationship requirements between them. One obvious constraint would be to
+reject the case where both addresses are the same — a stream from an address to
+itself. At first glance this looks like a mistake: why would someone pay the
+gas and contract overhead to lock their own tokens and receive them back over
+time when they already control them?
+
+But there are legitimate use cases for self-custody time-locks: personal
+savings commitments, vesting one's own tokens to demonstrate alignment in a
+project, or algorithmic contracts that need to enforce a delay on their own
+funds. Rejecting `sender == recipient` would break all of these without
+preventing any actual harm — a self-stream does not create a vulnerability or
+an accounting inconsistency, it is just an unusual usage pattern.
+
+This decision was originally documented only in the README's "Deliberately
+omitted validations" section, and the codebase later contained a test whose
+naming implied self-streams were invalid
+(`test_create_stream_rejects_self_as_recipient`, which actually tested the
+contract's own address, not `sender == recipient`). This ADR formalizes what
+was always intended but never explicitly decided.
+
+### Decision
+
+A stream where `sender == recipient` is **allowed**. The contract performs no
+equality check between the two addresses. Such a stream behaves identically to
+any other: the full `total_amount` is pulled from the sender (who is also the
+recipient) at creation, vesting runs on the same linear schedule, the recipient
+(who is also the sender) can withdraw the vested amount, and the sender (who is
+also the recipient) can cancel and refund the unvested portion to themselves.
+
+### Alternatives considered
+
+1. **Reject `sender == recipient` with a dedicated error.** Rejected: this
+   would break legitimate time-lock and self-custody use cases for no security
+   benefit. A self-stream does not expose the contract or other streams to any
+   risk — it is just a sender locking their own funds with a vesting schedule.
+   The additional validation would add gas cost to every `create_stream` call
+   (even those that pass it) and surface area to the entry point's validation
+   order, for the sole purpose of forbidding a harmless edge case.
+
+2. **Reject it implicitly by reusing the existing contract-address check.**
+   Already rejected in the original implementation: the contract's own address
+   is refused as any participant (sender, recipient, or token) because it would
+   create unclaimable or self-referential streams, but that check is
+   specifically `sender == env.current_contract_address()` and `recipient ==
+   env.current_contract_address()`, not `sender == recipient`. A self-stream
+   between two user addresses does not trigger it.
+
+3. **Allow `sender == recipient` (chosen).** Zero additional validation, zero
+   new error variant, no change to the entry point's signature or behavior. A
+   self-stream is treated the same as any other stream and behaves correctly
+   under the existing vesting and withdrawal logic. The sender locks their own
+   tokens, the recipient (themself) withdraws them as they vest, and the sender
+   (also themself) can cancel and refund the unvested portion. The accounting
+   is consistent, the authorization checks work (`sender.require_auth()` at
+   creation, `recipient.require_auth()` at withdrawal), and the event topics
+   index both roles normally even though they happen to be the same address.
+
+### Consequences
+
+- **Self-custody time-locks are possible.** A user who wants to enforce a
+  delay on their own funds — for personal savings discipline, to demonstrate
+  locked commitment, or to make early withdrawal deliberate and visible via
+  on-chain `cancel` events — can create a stream to themselves. The contract
+  does not distinguish this from any other sender/recipient pair.
+
+- **No protection against accidental self-streams.** A caller who
+  unintentionally passes the same address twice will not receive a helpful
+  error. The stream will be created, the full amount locked, and the caller
+  will have to `cancel` to retrieve the unvested portion. This is consistent
+  with the contract's general design: it does not try to protect callers from
+  themselves; it enforces the schedule and accounting, not intent.
+
+- **The authorization and accounting model does not need special cases.** A
+  self-stream requires `sender.require_auth()` at creation and
+  `recipient.require_auth()` at withdrawal, which are both satisfied by the
+  same signature since the addresses are identical. The `withdrawn` and
+  `total_amount` tracking work the same way, and `cancel` refunds the sender
+  (who is also the recipient) correctly.
+
+### What would change if this decision were revisited
+
+If self-streams were later deemed undesirable, the change would be:
+
+- Add a new `StreamError` variant, e.g. `SelfStreamNotAllowed = 14` (the next
+  available code after `InvalidParticipant = 13`).
+- Insert a check in `create_stream` after the existing
+  `sender == this || recipient == this` test:
+  ```rust
+  if sender == recipient {
+      return Err(StreamError::SelfStreamNotAllowed);
+  }
+  ```
+- Update the validation-order documentation in `create_stream`'s doc comment to
+  reflect where this new check falls in the sequence (it would be part of the
+  participant validation step, immediately after the contract-address checks).
+- Document the breaking change in CHANGELOG.md and note that existing
+  self-streams are unaffected (they are already in storage), but new ones
+  cannot be created.
+
+This would be a **breaking change** to the contract's public interface (a new
+rejection condition) and would require redeployment. Existing self-streams
+would continue to function — nothing about their stored data or the
+withdrawal/cancel logic would change — but no new self-streams could be opened
+on a deployment running the updated contract.
+
+### Related references
+
+- [README.md § Deliberately omitted
+  validations](../README.md#deliberately-omitted-validations) — the user-facing
+  explanation that sender and recipient being the same is allowed.
+- `contracts/stream/src/contract.rs`, `create_stream` — the participant
+  validation that checks for the contract's own address but does not check
+  `sender == recipient`.
+
 ## ADR: Accept Any Token Address Without an Allowlist
 
 **Status:** Accepted

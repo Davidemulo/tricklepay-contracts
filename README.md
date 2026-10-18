@@ -1077,7 +1077,7 @@ A few common edge cases are worth keeping explicit:
 
 The contract deliberately does not validate some inputs that might look questionable, to ensure it does not break legitimate use cases:
 
-- **Sender and recipient being the same address:** A stream from an address to itself has the effect of locking the sender's own tokens and handing them back over time. This is a legitimate way to self-stream funds.
+- **Sender and recipient being the same address:** A stream from an address to itself has the effect of locking the sender's own tokens and handing them back over time. This is a legitimate way to self-stream funds. See [docs/DECISIONS.md § ADR: Self-Streams Are Allowed](docs/DECISIONS.md#adr-self-streams-are-allowed-sender--recipient) for the full rationale.
 - **Token acting as a participant:** A token contract acting as the `sender` or `recipient` is permitted. Rejecting this could break legitimate smart contract composability.
 - **Start time in the past:** Accepted as long as `end_time` is in the future. The elapsed portion vests immediately, which is useful for backdating streams.
 
