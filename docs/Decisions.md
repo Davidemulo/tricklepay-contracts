@@ -162,6 +162,116 @@ address-to-stream-id mapping from their topics. The contract exposes no
   - See the detailed discussion in the [Amount Ceiling section of the README](../README.md#amount-ceiling).
 
 
+## ADR: Full Escrow at Stream Creation
+
+**Status:** Accepted
+
+### Context
+
+A token stream releases value to a recipient linearly over time. The sender
+opens the stream with a `total_amount` and a schedule; the recipient withdraws
+whatever has vested at any moment; and the sender can cancel early, reclaiming
+only the unvested remainder. This raises a fundamental design question: when
+does the full amount move from the sender's control into the stream?
+
+Two common patterns exist:
+
+1. **Pull the full amount at creation** (full escrow). The entire `total_amount`
+   is transferred from the sender into the contract before the stream record is
+   written, so the tokens are locked and reserved for that stream alone from the
+   moment it exists. The recipient is guaranteed the funds will be available for
+   the life of the stream, independent of whether the sender later has balance,
+   closes their account, or revokes an allowance.
+
+2. **Stream from an allowance** (on-demand pull). The sender grants the contract
+   an allowance at creation time, and the contract pulls only what the recipient
+   withdraws, as they withdraw it. The bulk of the `total_amount` stays in the
+   sender's account until it vests, which preserves the sender's liquidity but
+   means the recipient must trust the sender will keep that balance available and
+   not revoke the allowance.
+
+This is not a question with a universally correct answer — it is a trade-off
+between capital efficiency for the sender and trustlessness for the recipient.
+
+### Decision
+
+The contract pulls the full `total_amount` at creation time. Every token in a
+stream's total is transferred from the sender into the contract before the
+stream record is written to storage (`contracts/stream/src/contract.rs`,
+`create_stream`, the `TokenClient::new(...).transfer(...)` call precedes
+`set_stream`). A stream with a `total_amount` of 1 000 000 tokens locks all
+1 000 000 in the contract the instant it is created, regardless of the schedule
+or how long it takes the recipient to withdraw.
+
+### Alternatives considered
+
+1. **Streaming from an allowance.** Rejected: this shifts execution risk to the
+   recipient. A sender who grants a 12-month allowance today might spend those
+   tokens elsewhere tomorrow, revoke the allowance, or close their account,
+   leaving the stream effectively unfunded even though it looks valid on-chain.
+   The recipient has no on-chain guarantee and must either withdraw
+   preemptively (forcing early realization and defeating the purpose of a
+   gradual schedule) or trust the sender's continued solvency and intent. That
+   trust dependency is exactly what a smart contract is meant to eliminate in
+   adversarial or uncertain relationships — an employee should not have to
+   trust their employer will keep payroll funded, or a grant recipient trust a
+   foundation will not reallocate the budget.
+
+2. **Hybrid: escrow a percentage, stream the rest from allowance.** Rejected
+   for the same reason as (1), but with a smaller exposure: the recipient still
+   has to trust the sender for the un-escrowed portion, and the contract would
+   need additional logic to track what is held versus what is owed from
+   allowance. The added complexity does not eliminate the trust requirement, it
+   only dilutes it.
+
+3. **Full escrow at creation (chosen).** The sender pays the capital cost
+   up-front — those tokens are locked in the contract and unavailable for
+   anything else for the stream's duration — but the recipient gets an
+   irrevocable, on-chain guarantee the funds exist. A cancelled stream refunds
+   the unvested portion to the sender, so the lock is not all-or-nothing, but
+   the vested share is untouchable by the sender from the moment it vests. This
+   is the property that makes a stream trustless: the recipient does not need
+   to monitor the sender's balance, does not need to preemptively withdraw to
+   avoid being rug-pulled, and can rely on the vesting schedule as a true
+   guarantee rather than a promise contingent on the sender's future behavior.
+
+### Consequences
+
+- **Capital cost to the sender.** Opening a 12-month, 1 000 000-token stream
+  ties up all 1 000 000 tokens for the full year, even if the recipient
+  withdraws incrementally and the sender would otherwise have had access to the
+  unvested remainder. This is not just an accounting entry — those tokens
+  cannot be used for anything else (staked, lent, spent) until they vest and
+  are either withdrawn by the recipient or refunded via `cancel`. A sender who
+  cannot afford to lock the full amount should either stream a smaller total,
+  split it across multiple shorter streams, or use a direct transfer instead.
+
+- **Trustless for the recipient.** Once a stream is created, the recipient does
+  not need to trust the sender will keep funds available, will not revoke
+  anything, or will remain solvent. The tokens are already in the contract.
+  Short of a bug in the contract itself (see [THREAT_MODEL.md § No pause
+  mechanism](../THREAT_MODEL.md#no-pause-mechanism)), the vested amount is
+  guaranteed to be withdrawable.
+
+- **Upfront gas cost.** The `create_stream` call includes a token transfer of
+  the full `total_amount`, which costs more gas than just writing a schedule
+  and an allowance reference. For large amounts or expensive tokens, this can
+  be a noticeable transaction fee, paid entirely at creation rather than
+  amortized across withdrawals.
+
+- **Cancel returns the unvested portion.** The sender can cancel early and
+  recover whatever has not yet vested, so the lock is not permanent or
+  all-or-nothing. But once tokens vest, they belong to the recipient and
+  cannot be reclaimed by the sender, even via cancellation.
+
+### Related references
+
+- [README.md § How a stream works](../README.md#how-a-stream-works) — the user-facing
+  explanation of `create_stream`'s deposit and `cancel`'s refund.
+- [THREAT_MODEL.md § Invariants](../THREAT_MODEL.md#invariants) — "A stream's
+  escrow never exceeds its `total_amount`", the property that guarantees the
+  deposit at creation is sufficient for the stream's entire life.
+
 ## ADR: Accept Any Token Address Without an Allowlist
 
 **Status:** Accepted
