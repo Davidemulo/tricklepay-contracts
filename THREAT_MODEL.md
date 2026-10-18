@@ -199,6 +199,22 @@ call back into this contract, and either succeeds or fails atomically with no
 partial effect. The stream contract does not re-check the resulting balances
 after a transfer; it trusts the token's own accounting.
 
+### Decision: deposit verification by balance difference
+
+**The contract does not verify deposits by reading the token balance before and after transfer.**
+
+`create_stream` calls `TokenClient::transfer(&sender, &contract_address, &total_amount)` and immediately writes the stream record with that same `total_amount`, trusting the token to have moved exactly what was requested. The contract never calls `TokenClient::balance(&contract_address)` to confirm the actual deposit amount.
+
+**What this protects against:** A fee-on-transfer token (one that deducts a percentage on every transfer, common on some EVM chains but not part of the SEP-41 standard) would deposit less than `total_amount` into the contract while the stream record claims the full amount. The shortfall would remain undetected until the final withdrawal fails due to insufficient contract balance, potentially months or years after creation. Reading the contract's balance before and after the transfer — `let before = token.balance(&contract_address); token.transfer(...); let after = token.balance(&contract_address); let actual = after - before;` — and using `actual` as the stream's `total_amount` instead of the caller's parameter would catch the discrepancy at creation.
+
+**Cost of the check:** Two additional cross-contract `balance` calls per `create_stream` invocation. Each call incurs host function overhead, ledger entry read cost (the token contract's balance storage for this contract's address), and CPU time. The exact cost depends on the token implementation, but for a standard Stellar Asset Contract it adds roughly 0.2–0.5 ms and a small amount of ledger read fees. These are per-creation costs paid by the sender; they do not compound over the stream's lifetime.
+
+**Decision rationale:** The contract rejects balance verification in favor of trusting the token interface. SEP-41 tokens do not charge fees on transfer — the standard specifies that `transfer(from, to, amount)` moves exactly `amount` or fails. A token that violates this by silently deducting a fee is non-conforming, and accommodating it would impose costs on every conforming-token user to protect against a scenario that should not exist in the Stellar Asset Contract ecosystem. Fee-on-transfer tokens are an EVM-specific hazard; Stellar Asset Contracts have no precedent for them, and the Soroban SDK's `TokenClient` interface does not expose a return value from `transfer` that would report the actual amount moved.
+
+**Sender responsibility:** Choosing a token is entirely the sender's decision, made at `create_stream` time. A sender who streams a non-conforming token that silently deducts fees accepts the risk that the stream will fail on final withdrawal. The contract enforces no token allowlist and performs no runtime conformance check beyond confirming the address responds to a transfer call. Senders streaming significant value should verify the token is a genuine Stellar Asset Contract or a well-audited custom token before creating long-duration streams.
+
+**Compatibility note:** Changing this decision — adding balance verification — would be a behavioral change affecting gas cost and execution time for every `create_stream` call. It would not break the interface signature, but it would alter the operational cost profile in a way integrators measuring and optimizing for gas costs would notice. The decision to trust the token is therefore locked in as part of the contract's deployed behavior.
+
 **What a hostile or broken token can do.** Because the token is invoked with
 the stream contract's own authority (the contract is the token's caller for
 outgoing transfers), a token that violates these assumptions can affect that
@@ -267,6 +283,112 @@ events: if it matches this stream contract, use the `StreamError` table; if it
 matches the token passed to `create_stream`, use that token's own error table.
 See `contracts/stream/src/error.rs` for the full list of known collisions with
 the Stellar Asset Contract.
+
+## Storage lifetime and archival
+
+Soroban storage entries expire on a ledger clock and are archived once their time to live runs out. The contract keeps two kinds of entry:
+
+| Entry                  | Storage type | Holds                               |
+| ---------------------- | ------------ | ----------------------------------- |
+| `DataKey::Stream(id)`  | persistent   | one stream record                   |
+| `DataKey::StreamCount` | instance     | the id to assign to the next stream |
+
+Both are granted `ENTRY_TTL` (518,400 ledgers, roughly thirty days) and are extended back to that full window whenever accessed with fewer than `BUMP_THRESHOLD` (103,680 ledgers, roughly six days) remaining.
+
+### Decision: instance TTL extension on withdraw and cancel
+
+**`withdraw`, `withdraw_amount`, and `cancel` do not extend the instance TTL. Only `create_stream` extends it.**
+
+The instance stores `DataKey::StreamCount`, the id counter that assigns every stream its unique id. `create_stream` calls `storage::extend_instance_ttl(&env)` after writing the new stream record ([`contract.rs`](contracts/stream/src/contract.rs#L165)), bringing the instance TTL back to the full `ENTRY_TTL` window if it has decayed below `BUMP_THRESHOLD`.
+
+`withdraw`, `withdraw_amount`, and `cancel` touch only the individual stream's persistent entry (`DataKey::Stream(id)`), which is automatically bumped by Soroban when read or written. They do not call `extend_instance_ttl`. This behavior is pinned by the test `withdraw_and_cancel_do_not_extend_the_instance_ttl` in [`tests/storage.rs`](contracts/stream/src/tests/storage.rs#L457–L472).
+
+**Failure mode if the instance expires:** If no stream is created for longer than `ENTRY_TTL` (518,400 ledgers, roughly thirty days) but `withdraw` and `cancel` continue to be called on existing streams, the instance TTL decays to zero and the instance is archived. Once archived:
+- `create_stream` fails with a host storage error (not a `StreamError`), because it cannot read `StreamCount` from archived instance storage.
+- `withdraw`, `withdraw_amount`, `cancel`, and all view calls continue to work for individual streams, because each stream is stored as a separate persistent entry with its own TTL, independent of the instance.
+- The instance must be restored via an off-chain Soroban restore transaction before `create_stream` can succeed again.
+
+**Quantifying the failure mode:** The scenario requires a deployment where streams are created, then no new stream is created for thirty days, but existing streams continue to be withdrawn from or cancelled. This is plausible for:
+- A contract used for a fixed batch of streams (e.g., a one-time payroll run) where all streams are created on day 1, then over the next six months recipients withdraw periodically but no new streams are ever opened.
+- A low-activity contract where stream creation happens sporadically (less than once per thirty days).
+
+In both cases, the instance eventually expires. The first sender to attempt `create_stream` after that sees their transaction fail, and they or any other caller must submit a restore transaction to revive the instance. Existing streams are unaffected — recipients can still withdraw, and senders can still cancel.
+
+**Cost of extending on every withdraw and cancel:** Each `extend_instance_ttl` call invokes `env.storage().instance().extend_ttl(ledgers_to_live, max_ttl)`, which reads the current instance TTL, compares it to `BUMP_THRESHOLD`, and if below the threshold, writes the new TTL back to host storage and charges the caller for the ledger write. The cost is a conditional ledger write, roughly 0.1–0.3 ms and a small storage fee.
+
+For a high-frequency contract where hundreds or thousands of withdrawals occur per day, this cost compounds: every withdrawal below the bump threshold would pay to extend the instance, even though a single extension every few weeks (whenever a new stream is created) would suffice. The cost is per-call and paid by the caller (the recipient for `withdraw`, the sender for `cancel`).
+
+**Decision rationale:** The instance TTL extension is **not added** to `withdraw`, `withdraw_amount`, and `cancel`. The failure mode (instance expiration after thirty days of no creation activity) is narrow, affecting only contracts with long gaps between stream creations, and the consequence is that the next `create_stream` requires a restore transaction — an operational inconvenience, not a loss of funds or a security breach. Existing streams remain fully functional; only new stream creation is blocked until the instance is restored.
+
+The alternative — extending the instance on every withdrawal and cancellation — would impose a per-call cost on every active stream for the life of the contract to guard against a scenario that affects only idle or low-activity deployments. High-frequency contracts (payroll platforms, subscription services) would pay hundreds of times per month to extend an instance that `create_stream` already extends whenever it runs. The cost-benefit trade-off favors the current design: let `create_stream` handle instance extension, since it is the only operation that needs the instance to be live.
+
+**Operational mitigation:** Deployments that expect long gaps between stream creations (more than thirty days) can:
+1. Monitor the instance TTL using `env.storage().instance().get_ttl()` via a read-only view call or off-chain Soroban RPC query.
+2. Submit a permissionless restore transaction before the instance expires, or immediately after expiration when the next `create_stream` is needed.
+3. Create a dummy zero-value stream every few weeks to keep the instance alive, though this wastes a stream id and incurs the cost of a full `create_stream` call.
+
+None of these mitigations are built into the contract. The responsibility for keeping the instance alive falls to the deployment operator, not to stream participants.
+
+**Compatibility note:** Changing this decision would alter the operational cost profile for every high-frequency contract. It would not break the interface signature, but it would increase the gas cost and execution time for every withdrawal and cancellation call. The decision to extend only on `create_stream` is locked in as part of the contract's deployed behavior. The pinning test exists to prevent accidental changes during refactoring.
+
+### Decision: permissionless stream TTL extension entry point
+
+**A public `extend_stream_ttl(id)` entry point is not added to the contract.**
+
+**The problem:** A stream that nobody touches for `ENTRY_TTL` (518,400 ledgers, roughly thirty days) is archived and must be restored before use. Any view call (`get_stream`, `withdrawable`, `vested`, etc.) or mutating call (`withdraw`, `cancel`) extends the stream's TTL, but if the recipient of a long vesting schedule (e.g., a two-year grant) never checks the stream for more than thirty days, it expires. Once expired, the next `withdraw` or `get_stream` call fails with a host storage error until someone submits an off-chain Soroban restore transaction. The recipient, or anyone else who cares about keeping the stream alive, would like a cheap way to extend its TTL without performing a full withdraw or view operation.
+
+**Proposed entry point:**
+
+```rust
+pub fn extend_stream_ttl(env: Env, id: u64) -> Result<(), StreamError> {
+    let stream = storage::get_stream(&env, id)?;
+    storage::extend_stream_ttl(&env, id);
+    Ok(())
+}
+```
+
+This would be a permissionless call (no `require_auth()`) that anyone can invoke for any stream. It reads the stream to confirm it exists (returning `StreamError::StreamNotFound` if not), then calls `storage::extend_stream_ttl(&env, id)` to bump the stream's TTL back to `ENTRY_TTL` if it has decayed below `BUMP_THRESHOLD`. It performs no token transfer, no balance update, and no state change beyond the TTL extension itself.
+
+**Cost:** One cross-contract call overhead (roughly 0.1–0.2 ms), one persistent storage read (`DataKey::Stream(id)`), and one conditional TTL write if below the bump threshold (the same cost as any other TTL bump, roughly 0.1–0.3 ms and a small storage fee). The caller pays the ledger read and write fees. For a single stream, this is cheaper than calling `get_stream` (which also reads the stream but then serializes and returns the full record to the caller) and far cheaper than a `withdraw` (which does all of that plus a token transfer).
+
+**Abuse potential:** Because the entry point is permissionless, anyone can call it for any stream. The abuse scenarios are:
+
+1. **Spam:** A malicious caller could invoke `extend_stream_ttl` for every stream id from `0` to `stream_count - 1` in a loop, forcing the contract to read and bump every stream's TTL whether it needs it or not. The caller pays the ledger fees, so this is a griefing attack rather than a free exploit, but it does consume network resources and could be used to bloat transaction history or exhaust a caller's fee budget in a denial-of-service pattern.
+
+2. **Unwanted extension:** A recipient who wants their stream to expire (perhaps because they prefer it archived so the sender cannot cancel it, or because they want to avoid being tracked by periodic on-chain activity) cannot prevent a third party from keeping it alive. The permissionless nature removes recipient agency over the stream's archival state.
+
+3. **No additional security risk:** The entry point cannot move tokens, cannot alter `withdrawn` or `total_amount`, and cannot change `sender`, `recipient`, or the schedule. It is purely a TTL management operation. An attacker calling it cannot drain, freeze, or hijack a stream; they can only keep it accessible longer than it would otherwise remain.
+
+The first concern (spam) is the primary abuse vector. A determined griefer with sufficient fees could force-extend thousands of streams, but they gain nothing from it except making those streams stay alive longer, which is arguably neutral or even beneficial to the participants. The cost is paid by the attacker, not by the contract or its users.
+
+**Benefit:** Recipients of long-vesting streams (multi-month or multi-year schedules) can keep their streams alive cheaply without having to withdraw early or query them solely for TTL-bumping purposes. A recipient who does not need funds for six months but wants the stream to remain accessible can call `extend_stream_ttl` once every few weeks at minimal cost instead of calling `withdrawable` or `get_stream` (which return data they do not need) or performing a zero-value withdrawal (which is not supported — `withdraw_amount(0)` returns `InvalidAmount`).
+
+Third parties — such as an indexer service that tracks streams on behalf of users, or a grant administrator monitoring vesting schedules — can also call `extend_stream_ttl` to keep streams alive on behalf of participants who may not know the stream is about to expire. This is useful for non-technical recipients who do not monitor ledger state directly.
+
+**Alternative: extend on every read call:** Instead of adding a dedicated entry point, modify `get_stream`, `withdrawable`, `vested`, `locked`, `progress`, and `status` to call `storage::extend_stream_ttl(&env, id)` before returning. This would make every read call bump the stream's TTL as a side effect, ensuring that any periodic query (e.g., an indexer checking `vested` every hour) keeps the stream alive without the need for a dedicated extension call.
+
+Cost: The same conditional TTL write on every read call. The operational cost is identical to the proposed `extend_stream_ttl`, but the extension is implicit rather than explicit. The downside is that read calls would now perform a write as a side effect, which could surprise integrators who assume view calls are read-only and have no ledger-write cost.
+
+**Decision rationale:** A permissionless `extend_stream_ttl(id)` entry point is **not added**. The benefit — allowing recipients and third parties to keep streams alive cheaply — is outweighed by the interface expansion and the abuse potential (spam and unwanted extension). The existing workaround is sufficient: any party who wants to keep a stream alive can call `get_stream(id)` or `withdrawable(id)` periodically (the TTL bump happens automatically as a side effect of reading the persistent entry), and the cost difference between that and a dedicated `extend_stream_ttl` call is small (a few milliseconds and a negligible fee for serializing the stream record).
+
+Adding a new entry point increases the contract's API surface, requires additional testing (permissionless call semantics, interaction with archived streams, behavior across the full id range), and introduces the spam vector described above. The cost-benefit trade-off does not favor it. Recipients who hold long-vesting streams are expected to check them periodically — any view call is enough — and if a stream does expire, it can be restored via an off-chain transaction. The operational burden is minimal and does not justify a new entry point.
+
+**If this decision were reversed:** A follow-up implementation would require:
+
+1. **Signature:** `pub fn extend_stream_ttl(env: Env, id: u64) -> Result<(), StreamError>` as a new entry point in [`contract.rs`](contracts/stream/src/contract.rs), with no authorization check.
+
+2. **Implementation:** Read the stream with `storage::get_stream(&env, id)?` to confirm it exists, then call `storage::extend_stream_ttl(&env, id)` to bump its TTL. Return `Ok(())` on success, `StreamError::StreamNotFound` if the id does not exist.
+
+3. **Tests:**
+   - Calling `extend_stream_ttl` for a valid stream id extends its TTL to `ENTRY_TTL` if it was below `BUMP_THRESHOLD`.
+   - Calling `extend_stream_ttl` for a stream whose TTL is above `BUMP_THRESHOLD` does not change the TTL (deliberate no-op).
+   - Calling `extend_stream_ttl` for a non-existent id returns `StreamError::StreamNotFound`.
+   - Calling `extend_stream_ttl` does not alter `withdrawn`, `total_amount`, or any other stream field.
+   - Permissionless: no authorization check, so any address can call it for any stream.
+
+4. **Documentation:** Add the entry point to the contract interface table in the README, with "anyone" as the caller and "Extends the stream's TTL to prevent archival" as the description. Add a note to the storage lifetime section in the README and threat model explaining that the entry point exists as a convenience for keeping long-vesting streams alive without performing a withdrawal or full view call.
+
+5. **Changelog:** Mark as a new entry point added in the version where it ships, with a compatibility note that it is permissionless and anyone can invoke it for any stream id.
 
 ## Out-of-scope risks
 
