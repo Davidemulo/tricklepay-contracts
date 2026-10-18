@@ -162,6 +162,149 @@ address-to-stream-id mapping from their topics. The contract exposes no
   - See the detailed discussion in the [Amount Ceiling section of the README](../README.md#amount-ceiling).
 
 
+## ADR: No Pause, Freeze, or Emergency-Stop Mechanism
+
+**Status:** Accepted
+
+### Context
+
+Smart contracts that hold user funds commonly include a pause or emergency-stop
+mechanism: a privileged function that an admin, multisig, or governance process
+can invoke to freeze all state-changing operations while a bug is investigated,
+an exploit is contained, or a migration is prepared. This is a standard
+defensive pattern in DeFi protocols, and its absence here is conspicuous enough
+that a reviewer or integrator will notice and ask why.
+
+The question is whether the risk a pause mechanism mitigates — the risk of
+uncontrolled damage from a live bug or exploit — outweighs the risk the
+mechanism itself introduces: a privileged key or account that becomes a
+single point of failure and a high-value attack target.
+
+### Decision
+
+**The contract has no pause, freeze, or emergency-stop function.** There is no
+owner, admin, or multisig that can halt `create_stream`, block a recipient's
+`withdraw`, prevent a sender's `cancel`, or freeze any other operation. Once a
+stream is created, the only parties that can affect it are the original sender
+(via `cancel`) and the original recipient (via `withdraw` or `withdraw_amount`).
+
+### Alternatives considered
+
+1. **Admin-controlled pause.** Rejected: this requires a privileged account that
+   can freeze the entire contract. That account becomes a single point of
+   failure — its compromise would let an attacker halt every stream on the
+   deployment, denying both senders and recipients access to funds that are
+   otherwise just sitting in contract storage, harmlessly. It also introduces a
+   centralization vector: the pause privilege is a form of admin control, and
+   its existence contradicts the immutability and no-admin design (see [ADR:
+   Immutable Architecture with No Admin or
+   Initializer](#adr-immutable-architecture-with-no-admin-or-initializer)).
+   Pausing might contain a bug's damage, but it does so by concentrating the
+   ability to deny service into a single key or account, which itself becomes
+   the new highest-value target.
+
+2. **Time-delayed or governance-gated pause.** Still rejected: a time delay or
+   multisig vote reduces the risk of unilateral misuse, but it does not
+   eliminate the privileged-key attack surface or the centralization. The pause
+   authority still exists, just with a more complex condition guarding it. An
+   attacker who compromises the multisig or the governance token distribution
+   can still freeze the contract, and the time delay only gives users advance
+   warning, not the ability to opt out. Additionally, a governance or multisig
+   mechanism is itself new contract surface — more code to audit, more
+   potential bugs, and more operational overhead to maintain.
+
+3. **Per-stream pause (sender or recipient can freeze their own stream).**
+   Rejected: the sender already has `cancel`, which stops further vesting and
+   refunds the unvested portion. A per-stream pause that withholds funds from
+   both parties would be strictly worse for both — the sender does not get a
+   refund, the recipient cannot withdraw, and the tokens stay locked. There is
+   no benefit over `cancel`, and it would introduce a new
+   stuck-funds-by-design state.
+
+4. **No pause mechanism (chosen).** The sender's `cancel` function is the only
+   unilateral escape hatch: it stops the stream and returns the unvested
+   portion, but it does not recover tokens that have already vested. If a bug
+   affects the cancel path itself, neither party has further recourse through
+   the contract. This is an explicit trade-off: the risk of a live bug or
+   exploit that cannot be paused is accepted in exchange for removing the
+   privileged-key risk and the centralization that a pause mechanism would
+   introduce. The contract's security relies entirely on pre-deployment audit
+   rigor and robust client-side validation, not on the ability to intervene
+   after the fact.
+
+### Consequences
+
+- **No emergency containment.** If a bug is discovered in the deployed bytecode
+  — in the vesting logic, the token-transfer path, or any other part of the
+  contract — there is no mechanism to stop new funds from being exposed to it,
+  freeze in-flight streams, or prevent the bug from being exploited further.
+  The only remediation is to deploy a new contract instance (with a different
+  address) and inform users not to create new streams on the old one. Existing
+  streams on the vulnerable deployment remain vulnerable for their full
+  duration.
+
+- **No privileged-key attack surface.** There is no admin account whose
+  compromise would let an attacker freeze every stream, deny service to all
+  users, or extract a ransom for unpausing. The contract has no owner, no
+  multisig, and no governance token that controls operational powers. The only
+  way to affect a stream is to be one of the two parties named on it.
+
+- **Long-duration streams carry full-duration risk.** A stream that runs for a
+  year is exposed to any bug in the contract for that entire year, with no
+  ability to pause or migrate partway through. Anyone considering a multi-month
+  or multi-year stream should treat the contract's audit status and the amount
+  they are willing to lock as directly linked. See [THREAT_MODEL.md § No pause
+  mechanism](../THREAT_MODEL.md#no-pause-mechanism) for the full discussion of
+  what this means for users.
+
+- **The sender's `cancel` is the only escape hatch.** A sender who suspects a
+  bug, wants to cut off exposure, or simply changes their mind can cancel the
+  stream and recover the unvested portion. This is unilateral and immediate —
+  no one can block it — but it does not recover tokens that have already
+  vested to the recipient. If a bug affects the `cancel` path itself, neither
+  party has further recourse through the contract.
+
+### What would change if this decision were revisited
+
+If a pause mechanism were later deemed necessary — for example, a concrete case
+emerges where the privileged-key risk is acceptable because the deployment is
+operated by a known, trusted entity, or a governance structure is in place that
+makes the pause authority distributed rather than centralized — the change
+would be:
+
+- Add a `paused: bool` field to instance storage, initially `false`.
+- Add a new entry point, `set_paused(paused: bool)`, guarded by some
+  authorization check (an admin address, a multisig, or a governance contract).
+- Prefix every state-changing entry point (`create_stream`, `withdraw`,
+  `withdraw_amount`, `cancel`) with a check that reads the `paused` flag and
+  returns a new error variant (e.g., `ContractPaused`) if it is `true`.
+- Update the tests, the threat model, and the integrator guide to document the
+  pause authority, who holds it, and what happens when it is exercised.
+
+This would be a **major breaking change** to the contract's trust model. It
+would introduce a privileged account where none existed before, which is a
+fundamental shift in who can affect a stream and under what conditions.
+Existing streams would be subject to the new pause authority retroactively —
+they were created under a no-pause contract, but would now be freezable by
+whoever holds the pause key. This is exactly the kind of change the immutable,
+no-admin design was meant to rule out.
+
+Until a concrete case materializes where that trade-off is justified, this
+decision stands: there is no pause mechanism, and the contract's security
+relies on getting it right before deployment rather than on the ability to
+intervene afterward.
+
+### Related references
+
+- [THREAT_MODEL.md § No pause mechanism](../THREAT_MODEL.md#no-pause-mechanism)
+  — full explanation of why no pause exists, the consequences for users, and
+  the explicit trade-off between operational flexibility and privileged-key
+  risk.
+- [ADR: Immutable Architecture with No Admin or
+  Initializer](#adr-immutable-architecture-with-no-admin-or-initializer) — the
+  broader decision that there is no admin role, which a pause mechanism would
+  contradict.
+
 ## ADR: Full Escrow at Stream Creation
 
 **Status:** Accepted
