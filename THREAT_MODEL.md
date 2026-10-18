@@ -284,6 +284,53 @@ matches the token passed to `create_stream`, use that token's own error table.
 See `contracts/stream/src/error.rs` for the full list of known collisions with
 the Stellar Asset Contract.
 
+## Storage lifetime and archival
+
+Soroban storage entries expire on a ledger clock and are archived once their time to live runs out. The contract keeps two kinds of entry:
+
+| Entry                  | Storage type | Holds                               |
+| ---------------------- | ------------ | ----------------------------------- |
+| `DataKey::Stream(id)`  | persistent   | one stream record                   |
+| `DataKey::StreamCount` | instance     | the id to assign to the next stream |
+
+Both are granted `ENTRY_TTL` (518,400 ledgers, roughly thirty days) and are extended back to that full window whenever accessed with fewer than `BUMP_THRESHOLD` (103,680 ledgers, roughly six days) remaining.
+
+### Decision: instance TTL extension on withdraw and cancel
+
+**`withdraw`, `withdraw_amount`, and `cancel` do not extend the instance TTL. Only `create_stream` extends it.**
+
+The instance stores `DataKey::StreamCount`, the id counter that assigns every stream its unique id. `create_stream` calls `storage::extend_instance_ttl(&env)` after writing the new stream record ([`contract.rs`](contracts/stream/src/contract.rs#L165)), bringing the instance TTL back to the full `ENTRY_TTL` window if it has decayed below `BUMP_THRESHOLD`.
+
+`withdraw`, `withdraw_amount`, and `cancel` touch only the individual stream's persistent entry (`DataKey::Stream(id)`), which is automatically bumped by Soroban when read or written. They do not call `extend_instance_ttl`. This behavior is pinned by the test `withdraw_and_cancel_do_not_extend_the_instance_ttl` in [`tests/storage.rs`](contracts/stream/src/tests/storage.rs#L457–L472).
+
+**Failure mode if the instance expires:** If no stream is created for longer than `ENTRY_TTL` (518,400 ledgers, roughly thirty days) but `withdraw` and `cancel` continue to be called on existing streams, the instance TTL decays to zero and the instance is archived. Once archived:
+- `create_stream` fails with a host storage error (not a `StreamError`), because it cannot read `StreamCount` from archived instance storage.
+- `withdraw`, `withdraw_amount`, `cancel`, and all view calls continue to work for individual streams, because each stream is stored as a separate persistent entry with its own TTL, independent of the instance.
+- The instance must be restored via an off-chain Soroban restore transaction before `create_stream` can succeed again.
+
+**Quantifying the failure mode:** The scenario requires a deployment where streams are created, then no new stream is created for thirty days, but existing streams continue to be withdrawn from or cancelled. This is plausible for:
+- A contract used for a fixed batch of streams (e.g., a one-time payroll run) where all streams are created on day 1, then over the next six months recipients withdraw periodically but no new streams are ever opened.
+- A low-activity contract where stream creation happens sporadically (less than once per thirty days).
+
+In both cases, the instance eventually expires. The first sender to attempt `create_stream` after that sees their transaction fail, and they or any other caller must submit a restore transaction to revive the instance. Existing streams are unaffected — recipients can still withdraw, and senders can still cancel.
+
+**Cost of extending on every withdraw and cancel:** Each `extend_instance_ttl` call invokes `env.storage().instance().extend_ttl(ledgers_to_live, max_ttl)`, which reads the current instance TTL, compares it to `BUMP_THRESHOLD`, and if below the threshold, writes the new TTL back to host storage and charges the caller for the ledger write. The cost is a conditional ledger write, roughly 0.1–0.3 ms and a small storage fee.
+
+For a high-frequency contract where hundreds or thousands of withdrawals occur per day, this cost compounds: every withdrawal below the bump threshold would pay to extend the instance, even though a single extension every few weeks (whenever a new stream is created) would suffice. The cost is per-call and paid by the caller (the recipient for `withdraw`, the sender for `cancel`).
+
+**Decision rationale:** The instance TTL extension is **not added** to `withdraw`, `withdraw_amount`, and `cancel`. The failure mode (instance expiration after thirty days of no creation activity) is narrow, affecting only contracts with long gaps between stream creations, and the consequence is that the next `create_stream` requires a restore transaction — an operational inconvenience, not a loss of funds or a security breach. Existing streams remain fully functional; only new stream creation is blocked until the instance is restored.
+
+The alternative — extending the instance on every withdrawal and cancellation — would impose a per-call cost on every active stream for the life of the contract to guard against a scenario that affects only idle or low-activity deployments. High-frequency contracts (payroll platforms, subscription services) would pay hundreds of times per month to extend an instance that `create_stream` already extends whenever it runs. The cost-benefit trade-off favors the current design: let `create_stream` handle instance extension, since it is the only operation that needs the instance to be live.
+
+**Operational mitigation:** Deployments that expect long gaps between stream creations (more than thirty days) can:
+1. Monitor the instance TTL using `env.storage().instance().get_ttl()` via a read-only view call or off-chain Soroban RPC query.
+2. Submit a permissionless restore transaction before the instance expires, or immediately after expiration when the next `create_stream` is needed.
+3. Create a dummy zero-value stream every few weeks to keep the instance alive, though this wastes a stream id and incurs the cost of a full `create_stream` call.
+
+None of these mitigations are built into the contract. The responsibility for keeping the instance alive falls to the deployment operator, not to stream participants.
+
+**Compatibility note:** Changing this decision would alter the operational cost profile for every high-frequency contract. It would not break the interface signature, but it would increase the gas cost and execution time for every withdrawal and cancellation call. The decision to extend only on `create_stream` is locked in as part of the contract's deployed behavior. The pinning test exists to prevent accidental changes during refactoring.
+
 ## Out-of-scope risks
 
 The following risks exist but are outside the scope of this contract:
