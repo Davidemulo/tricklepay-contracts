@@ -130,6 +130,11 @@ mod tests {
     }
 
     #[test]
+    fn exact_vesting_at_the_midpoint() {
+        assert_eq!(vested_amount(TOTAL, START, END, START, 600), 500);
+    }
+
+    #[test]
     fn quarter_vests_at_quarter_point() {
         assert_eq!(vested_amount(TOTAL, START, END, START, 350), 250);
     }
@@ -142,6 +147,13 @@ mod tests {
     #[test]
     fn full_amount_vests_after_end() {
         assert_eq!(vested_amount(TOTAL, START, END, START, 9_999), TOTAL);
+    }
+
+    #[test]
+    fn vesting_never_exceeds_the_total() {
+        for now in [1_099, 1_100, 1_101, 2_000, 10_000, 100_000] {
+            assert!(vested_amount(TOTAL, START, END, START, now) <= TOTAL);
+        }
     }
 
     #[test]
@@ -199,6 +211,27 @@ mod tests {
         assert_eq!(vested_amount(TOTAL, START, END, END, END), TOTAL);
     }
 
+    /// A one-base-unit stream is the smallest meaningful schedule: every
+    /// interim value is rounded down to zero until the stream closes, then the
+    /// final unit becomes fully withdrawable. This is not a bug; it is the
+    /// expected result of floor division on a one-token total spread over a
+    /// longer duration.
+    #[test]
+    fn one_base_unit_stream_rounds_down_until_the_end() {
+        let total = 1_i128;
+        let start = 100_u64;
+        let end = 1_100_u64;
+
+        assert_eq!(vested_amount(total, start, end, start, start), 0);
+        assert_eq!(vested_amount(total, start, end, start, start + 1), 0);
+        assert_eq!(vested_amount(total, start, end, start, end - 1), 0);
+        assert_eq!(vested_amount(total, start, end, start, end), 1);
+        assert_eq!(
+            withdrawable_amount(vested_amount(total, start, end, start, end), 0),
+            1
+        );
+    }
+
     #[test]
     fn integer_division_rounds_down() {
         // 10 * 1 / 3 = 3.33, truncated to 3.
@@ -239,6 +272,25 @@ mod tests {
         let s = settlement(TOTAL, 750, 750);
         assert_eq!(s.refund, 250);
         assert_eq!(s.recipient_remaining, 0);
+    }
+
+    /// Issue #357 — settlement is a pure split of the remaining escrow. It
+    /// must be deterministic and conserve every unit not already withdrawn.
+    #[test]
+    fn settlement_is_pure_and_conserves_remaining_escrow() {
+        for (total, vested, withdrawn) in [
+            (1_000, 0, 0),
+            (1_000, 500, 0),
+            (1_000, 500, 200),
+            (1_000, 999, 999),
+            (1_000, 1_000, 400),
+        ] {
+            let first = settlement(total, vested, withdrawn);
+            let second = settlement(total, vested, withdrawn);
+
+            assert_eq!(first, second);
+            assert_eq!(first.refund + first.recipient_remaining, total - withdrawn);
+        }
     }
 }
 

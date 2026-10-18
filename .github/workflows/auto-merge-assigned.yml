@@ -1,0 +1,234 @@
+name: Auto-merge assigned PRs
+
+# Merges a PR when its author is assigned to every issue the PR closes and the PR has no merge conflicts,
+# then closes those issues itself, because GitHub does not apply closing keywords to merges made with GITHUB_TOKEN.
+# An hourly sweep closes any verified issue that a failed or cancelled run left open.
+# Uses pull_request_target so fork PRs get a write token. NEVER check out or run PR code in this workflow.
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'Only reconcile this merged PR number (leave empty to scan recent merges)'
+        required: false
+        default: ''
+      days:
+        description: 'How many days of merges to scan'
+        required: false
+        default: '14'
+      dry_run:
+        description: 'Log what would be closed without closing anything'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request_target' && format('auto-merge-{0}', github.event.pull_request.number) || 'auto-merge-sweep' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name != 'pull_request_target' || github.event.pull_request.draft == false
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          # Retry transient 5xx responses; 4xx responses are not retried.
+          retries: 3
+          script: |
+            const { owner, repo } = context.repo;
+            const thisRepo = `${owner}/${repo}`.toLowerCase();
+            const MERGER = 'github-actions';
+            const inputs = context.payload.inputs || {};
+            const dryRun = String(inputs.dry_run) === 'true';
+            const lookbackDays = Number(inputs.days) > 0 ? Number(inputs.days) : 14;
+
+            const ISSUE_FIELDS = `
+              number
+              state
+              repository { nameWithOwner }
+              assignees(first: 50) { nodes { login } }`;
+            const PR_FIELDS = `
+              number
+              mergedAt
+              updatedAt
+              mergedBy { login }
+              author { login }
+              closingIssuesReferences(first: 20) { nodes { ${ISSUE_FIELDS} } }`;
+
+            // Only issues in this repo count; cross-repo closing references are ignored.
+            const sameRepo = (nodes) => nodes.filter(i => i.repository.nameWithOwner.toLowerCase() === thisRepo);
+            const isAssigned = (issue, login) => issue.assignees.nodes.some(a => a.login.toLowerCase() === login.toLowerCase());
+
+            async function reopenedSince(issueNumber, since) {
+              const events = await github.paginate(github.rest.issues.listEvents, { owner, repo, issue_number: issueNumber, per_page: 100 });
+              return events.some(e => e.event === 'reopened' && new Date(e.created_at) >= new Date(since));
+            }
+
+            // Closes each issue, then comments on it. Each issue is handled on its own so a failure on one
+            // does not leave the rest open. Returns the issue numbers that could not be closed.
+            async function closeIssues(issues, prNumber, mergedAt) {
+              const failed = [];
+              const body = `Closed by #${prNumber}, which was merged automatically.`;
+              for (const i of issues) {
+                try {
+                  const { data: issue } = await github.rest.issues.get({ owner, repo, issue_number: i.number });
+                  if (issue.state !== 'open') continue;
+                  // Respect a maintainer who reopened the issue after the merge.
+                  if (mergedAt && await reopenedSince(i.number, mergedAt)) {
+                    core.info(`Issue #${i.number} was reopened after PR #${prNumber} merged; leaving it open.`);
+                    continue;
+                  }
+                  if (dryRun) {
+                    core.info(`[dry run] Would close issue #${i.number} for PR #${prNumber}`);
+                    continue;
+                  }
+                  await github.rest.issues.update({ owner, repo, issue_number: i.number, state: 'closed', state_reason: 'completed' });
+                  core.info(`Closed issue #${i.number} for PR #${prNumber}`);
+                } catch (err) {
+                  failed.push(i.number);
+                  core.warning(`Could not close issue #${i.number} for PR #${prNumber}: ${err.message}`);
+                  continue;
+                }
+                try {
+                  // A retried request may already have posted the comment, so check before posting.
+                  const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: i.number, per_page: 100 });
+                  if (!comments.some(c => c.body === body)) {
+                    await github.rest.issues.createComment({ owner, repo, issue_number: i.number, body });
+                  }
+                } catch (err) {
+                  core.warning(`Closed issue #${i.number} but could not comment on it: ${err.message}`);
+                }
+              }
+              return failed;
+            }
+
+            // Closes verified issues that are still open on PRs this workflow merged recently.
+            async function sweep() {
+              const cutoff = Date.now() - lookbackDays * 24 * 60 * 60 * 1000;
+              const prs = [];
+              if (inputs.pr) {
+                const data = await github.graphql(`
+                  query($owner: String!, $repo: String!, $number: Int!) {
+                    repository(owner: $owner, name: $repo) { pullRequest(number: $number) { ${PR_FIELDS} } }
+                  }`, { owner, repo, number: Number(inputs.pr) });
+                prs.push(data.repository.pullRequest);
+              } else {
+                let after = null;
+                for (;;) {
+                  const data = await github.graphql(`
+                    query($owner: String!, $repo: String!, $after: String) {
+                      repository(owner: $owner, name: $repo) {
+                        pullRequests(states: MERGED, first: 50, after: $after, orderBy: { field: UPDATED_AT, direction: DESC }) {
+                          pageInfo { hasNextPage endCursor }
+                          nodes { ${PR_FIELDS} }
+                        }
+                      }
+                    }`, { owner, repo, after });
+                  const page = data.repository.pullRequests;
+                  prs.push(...page.nodes.filter(p => new Date(p.mergedAt).getTime() >= cutoff));
+                  // Pages are ordered by last update, and merging updates a PR, so later pages cannot hold newer merges.
+                  if (!page.pageInfo.hasNextPage || page.nodes.some(p => new Date(p.updatedAt).getTime() < cutoff)) break;
+                  after = page.pageInfo.endCursor;
+                }
+              }
+
+              const failed = [];
+              for (const p of prs) {
+                if (!p || !p.mergedAt || !p.author || p.mergedBy?.login !== MERGER) {
+                  if (inputs.pr) core.info(`PR #${inputs.pr} was not merged by this workflow; nothing to do.`);
+                  continue;
+                }
+                const issues = sameRepo(p.closingIssuesReferences.nodes);
+                // Same rule as the merge: the author must be assigned to every issue the PR closes.
+                if (issues.length === 0 || !issues.every(i => isAssigned(i, p.author.login))) continue;
+                const open = issues.filter(i => i.state === 'OPEN');
+                if (open.length === 0) continue;
+                core.info(`PR #${p.number} by @${p.author.login} left ${open.map(i => '#' + i.number).join(', ')} open.`);
+                for (const n of await closeIssues(open, p.number, p.mergedAt)) failed.push(`#${n} (PR #${p.number})`);
+              }
+              if (failed.length > 0) {
+                core.setFailed(`Could not close: ${failed.join(', ')}`);
+              } else {
+                core.info(`Checked ${prs.length} merged PR(s) from the last ${lookbackDays} day(s).`);
+              }
+            }
+
+            if (context.eventName !== 'pull_request_target') {
+              await sweep();
+              return;
+            }
+
+            const pr = context.payload.pull_request;
+            const author = pr.user.login;
+            const notify = ['opened', 'reopened'].includes(context.payload.action);
+
+            const say = async (body) => {
+              if (notify) await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body });
+              core.info(body);
+            };
+
+            // Never auto-merge changes to workflows or other repo automation.
+            const files = await github.paginate(github.rest.pulls.listFiles, { owner, repo, pull_number: pr.number, per_page: 100 });
+            if (files.some(f => f.filename.startsWith('.github/') || (f.previous_filename || '').startsWith('.github/'))) {
+              await say('This PR changes `.github/`, so it will not be auto-merged and needs maintainer review.');
+              return;
+            }
+
+            // Issues this PR will close (Closes/Fixes/Resolves #N), with their assignees.
+            const data = await github.graphql(`
+              query($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $number) {
+                    closingIssuesReferences(first: 20) { nodes { ${ISSUE_FIELDS} } }
+                  }
+                }
+              }`, { owner, repo, number: pr.number });
+            const issues = sameRepo(data.repository.pullRequest.closingIssuesReferences.nodes);
+
+            if (issues.length === 0) {
+              await say('Not auto-merged: the PR description must reference an issue it closes (for example `Closes #123`).');
+              return;
+            }
+
+            const unassigned = issues.filter(i => !isAssigned(i, author));
+            if (unassigned.length > 0) {
+              await say(`Not auto-merged: @${author} is not assigned to ${unassigned.map(i => '#' + i.number).join(', ')}. The PR may only close issues you are assigned to. Ask to be assigned, or remove the closing reference.`);
+              return;
+            }
+
+            // GitHub computes mergeability asynchronously; poll until it is known.
+            let mergeable = null;
+            for (let i = 0; i < 10; i++) {
+              const { data: fresh } = await github.rest.pulls.get({ owner, repo, pull_number: pr.number });
+              if (fresh.state !== 'open') return;
+              mergeable = fresh.mergeable;
+              if (mergeable !== null) break;
+              await new Promise(r => setTimeout(r, 5000));
+            }
+
+            if (mergeable !== true) {
+              await say('Not auto-merged: this PR has merge conflicts (or mergeability could not be determined). Resolve the conflicts and push again.');
+              return;
+            }
+
+            const { data: merge } = await github.rest.pulls.merge({ owner, repo, pull_number: pr.number, merge_method: 'merge' });
+            if (!merge.merged) {
+              core.setFailed(`Merge of PR #${pr.number} did not complete: ${merge.message}`);
+              return;
+            }
+            core.info(`Merged PR #${pr.number} by @${author}`);
+
+            // GitHub has not applied closing keywords to merges made by this workflow's GITHUB_TOKEN, so close the verified issues here.
+            const failed = await closeIssues(issues, pr.number);
+            if (failed.length > 0) {
+              core.setFailed(`Merged PR #${pr.number} but could not close ${failed.map(n => '#' + n).join(', ')}. The hourly sweep will retry.`);
+            }

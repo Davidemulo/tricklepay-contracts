@@ -21,84 +21,6 @@ pub const MAX_AMOUNT: i128 = i64::MAX as i128;
 
 /// Basis points in 100%, the scale [`StreamContract::progress`] reports on.
 pub const BPS_SCALE: u32 = 10_000;
-/// Check every rule `create_stream` enforces, before any token moves and
-/// before any storage is written.
-///
-/// The rules are evaluated in the order documented on
-/// [`StreamContract::create_stream`] and the first one that matches decides
-/// the error, so a rejected call is indistinguishable from the equivalent
-/// inline checks. Nothing here mutates state: the only storage touched is the
-/// stream counter, which is read to hand back the id for the new stream.
-///
-/// Returns the id to use for the new stream together with the counter value
-/// to persist once the transfer has succeeded.
-fn validate_stream_creation(
-    env: &Env,
-    sender: &Address,
-    recipient: &Address,
-    token: &Address,
-    total_amount: i128,
-    start_time: u64,
-    end_time: u64,
-    cliff_time: u64,
-) -> Result<(u64, u64), StreamError> {
-    // 1. Participants. Identity is the most fundamental precondition and
-    //    these are pure comparisons, so they run first.
-    //
-    //    A stream from an address to itself has no effect other than
-    //    locking the sender's own tokens and handing them back over time.
-    //    It is almost always a mistake — a swapped argument or an unset
-    //    field — so it is refused rather than silently accepted.
-    if sender == recipient {
-        return Err(StreamError::InvalidParticipant);
-    }
-    //    A token contract cannot act as a stream participant, and attempting
-    //    to stream a token to or from its own address is refused.
-    if token == sender || token == recipient {
-        return Err(StreamError::InvalidParticipant);
-    }
-    //    This contract's own address is not valid in any role. Each case
-    //    fails differently — an unclaimable recipient, a token with no
-    //    `transfer` entry point, a sender drawing on the holdings that
-    //    back every other stream — so all three are refused here.
-    let this = env.current_contract_address();
-    if sender == &this || recipient == &this || token == &this {
-        return Err(StreamError::InvalidParticipant);
-    }
-
-    // 2. Amount.
-    if total_amount <= 0 {
-        return Err(StreamError::InvalidAmount);
-    }
-    if total_amount > MAX_AMOUNT {
-        return Err(StreamError::AmountTooLarge);
-    }
-
-    // 3. Schedule.
-    if start_time >= end_time {
-        return Err(StreamError::InvalidTimeRange);
-    }
-    if cliff_time < start_time || cliff_time > end_time {
-        return Err(StreamError::InvalidCliff);
-    }
-    // Reject a window that is entirely in the past. A stream whose
-    // end_time has already passed would be 100 % vested on creation —
-    // effectively an immediate transfer with extra ceremony. Callers who
-    // genuinely need that should use a token transfer directly.
-    if end_time <= env.ledger().timestamp() {
-        return Err(StreamError::StreamWindowInPast);
-    }
-
-    // 4. Capacity. Reserve the id before any tokens move. The counter is
-    //    the source of every id and never reuses one, so if it were
-    //    allowed to wrap the next stream would be written over a record
-    //    that already exists. Checking here means an exhausted counter
-    //    costs the caller nothing.
-    let id = storage::stream_count(env);
-    let next_id = id.checked_add(1).ok_or(StreamError::StreamCountExhausted)?;
-
-    Ok((id, next_id))
-}
 
 #[contract]
 pub struct StreamContract;
@@ -131,10 +53,8 @@ impl StreamContract {
     /// artefact of how the checks happen to be ordered in the body:
     ///
     /// 1. **Authorization** — `sender` must authorize the call.
-    /// 2. **Participants** — [`StreamError::InvalidParticipant`] if `sender`
-    ///    equals `recipient`, or if `token` equals `sender` or `recipient`,
-    ///    or if any of `sender`, `recipient`, or `token` is this contract's
-    ///    own address.
+    /// 2. **Participants** — [`StreamError::InvalidParticipant`] if any of
+    ///    `sender`, `recipient`, or `token` is this contract's own address.
     /// 3. **Amount** — [`StreamError::InvalidAmount`] if `total_amount` is not
     ///    positive, then [`StreamError::AmountTooLarge`] if it exceeds
     ///    [`MAX_AMOUNT`].
@@ -178,18 +98,47 @@ impl StreamContract {
     ) -> Result<u64, StreamError> {
         sender.require_auth();
 
-        // All five rules are checked up front, before a single token moves or a
-        // single storage key is written, so a rejected call leaves no trace.
-        let (id, next_id) = validate_stream_creation(
-            &env,
-            &sender,
-            &recipient,
-            &token,
-            total_amount,
-            start_time,
-            end_time,
-            cliff_time,
-        )?;
+        // 1. Participants. Identity is the most fundamental precondition and
+        //    these are pure comparisons, so they run first.
+        //
+        //    This contract's own address is not valid in any role. Each case
+        //    fails differently — an unclaimable recipient, a token with no
+        //    `transfer` entry point, a sender drawing on the holdings that
+        //    back every other stream — so all three are refused here.
+        let this = env.current_contract_address();
+        if sender == this || recipient == this || token == this {
+            return Err(StreamError::InvalidParticipant);
+        }
+
+        // 2. Amount.
+        if total_amount <= 0 {
+            return Err(StreamError::InvalidAmount);
+        }
+        if total_amount > MAX_AMOUNT {
+            return Err(StreamError::AmountTooLarge);
+        }
+        // 3. Schedule.
+        if start_time >= end_time {
+            return Err(StreamError::InvalidTimeRange);
+        }
+        if cliff_time < start_time || cliff_time > end_time {
+            return Err(StreamError::InvalidCliff);
+        }
+        // Reject a window that is entirely in the past. A stream whose
+        // end_time has already passed would be 100 % vested on creation —
+        // effectively an immediate transfer with extra ceremony. Callers who
+        // genuinely need that should use a token transfer directly.
+        if end_time <= env.ledger().timestamp() {
+            return Err(StreamError::StreamWindowInPast);
+        }
+
+        // 4. Capacity. Reserve the id before any tokens move. The counter is
+        //    the source of every id and never reuses one, so if it were
+        //    allowed to wrap the next stream would be written over a record
+        //    that already exists. Checking here means an exhausted counter
+        //    costs the caller nothing.
+        let id = storage::stream_count(&env);
+        let next_id = id.checked_add(1).ok_or(StreamError::StreamCountExhausted)?;
 
         // Effects. Every rejection above returns before this point, so a
         // failed creation never moves tokens or touches storage.
@@ -225,6 +174,17 @@ impl StreamContract {
     /// vested up to the current ledger time minus what was withdrawn before.
     /// Returns the amount transferred.
     ///
+    /// # Rejections and Error Behavior
+    ///
+    /// - Returns [`StreamError::StreamNotFound`] if `id` does not exist in storage.
+    /// - Returns [`StreamError::NothingToWithdraw`] if the withdrawable balance is zero
+    ///   (nothing has vested yet, or everything vested has already been withdrawn).
+    ///
+    /// Unlike [`Self::withdraw_amount`], this function never returns
+    /// [`StreamError::InvalidAmount`] or [`StreamError::InsufficientBalance`]
+    /// because it always attempts to withdraw the full available balance
+    /// rather than a caller-specified amount.
+    ///
     /// # Examples
     ///
     /// ```ignore
@@ -246,6 +206,19 @@ impl StreamContract {
     /// useful for drawing a fixed sum or leaving a buffer in the stream. Fails
     /// if the requested amount exceeds the currently withdrawable balance.
     /// Returns the amount transferred.
+    ///
+    /// # Rejections and Error Behavior
+    ///
+    /// - Returns [`StreamError::StreamNotFound`] if `id` does not exist in storage.
+    /// - Returns [`StreamError::InvalidAmount`] if `amount` is zero or negative.
+    /// - Returns [`StreamError::InsufficientBalance`] if `amount` exceeds the
+    ///   withdrawable balance (whatever has vested minus what was already withdrawn).
+    ///
+    /// Unlike [`Self::withdraw`], this function never returns
+    /// [`StreamError::NothingToWithdraw`]. When the withdrawable balance is zero,
+    /// any positive `amount` triggers [`StreamError::InsufficientBalance`] instead,
+    /// and a non-positive `amount` triggers [`StreamError::InvalidAmount`] before
+    /// the balance is even checked.
     ///
     /// # Examples
     ///
@@ -271,6 +244,47 @@ impl StreamContract {
     /// the rest is returned to the sender. Once cancelled, no further tokens
     /// vest. Returns the amount refunded to the sender.
     ///
+    /// # Validation order
+    ///
+    /// The following checks run **in this exact order** after the sender's
+    /// authorization is verified. When multiple conditions apply simultaneously,
+    /// the first one encountered determines the error returned:
+    ///
+    /// 1. **Authorization** — The stream's `sender` must authorize the call.
+    ///    This check happens first, before any other validation.
+    /// 2. **Stream existence** — Returns [`StreamError::StreamNotFound`] if
+    ///    `id` does not exist in storage.
+    /// 3. **Already cancelled** — Returns [`StreamError::AlreadyCancelled`] if
+    ///    the stream has already been cancelled.
+    /// 4. **Stream completion** — Returns [`StreamError::StreamAlreadyCompleted`]
+    ///    if the current ledger time is at or past `end_time`.
+    ///
+    /// **Which error wins when both apply:** A stream that is both cancelled
+    /// and past its end time returns [`StreamError::AlreadyCancelled`] (check 3)
+    /// because the cancellation check runs before the completion check. Once a
+    /// stream is cancelled, attempting to cancel it again always fails with
+    /// `AlreadyCancelled`, regardless of what time it is.
+    ///
+    /// **Authorization is required before rejection:** A caller who is not the
+    /// stream's sender will fail authorization (check 1) before seeing any of
+    /// the rejection errors above, even if the stream is cancelled, completed,
+    /// or nonexistent. This means an unauthorized party cannot use `cancel` to
+    /// probe whether a stream exists or what state it is in — every attempt
+    /// fails at authorization first.
+    ///
+    /// # Rejections and Error Behavior
+    ///
+    /// The following checks run in order after the sender's authorization is
+    /// verified. The first failure encountered determines the error returned:
+    ///
+    /// 1. Returns [`StreamError::StreamNotFound`] if `id` does not exist in storage.
+    /// 2. Returns [`StreamError::AlreadyCancelled`] if the stream has already been cancelled.
+    /// 3. Returns [`StreamError::StreamAlreadyCompleted`] if the current ledger time
+    ///    is at or past `end_time` — a fully vested stream has nothing unvested to refund.
+    ///
+    /// If all checks pass, the stream is frozen at the vested amount and the unvested
+    /// remainder is refunded to the sender.
+    ///
     /// # Examples
     ///
     /// ```ignore
@@ -289,13 +303,7 @@ impl StreamContract {
         if now >= stream.end_time {
             return Err(StreamError::StreamAlreadyCompleted);
         }
-        let vested = vesting::vested_amount(
-            stream.total_amount,
-            stream.start_time,
-            stream.end_time,
-            stream.cliff_time,
-            now,
-        );
+        let vested = stream.vested_amount(now);
         let settlement = vesting::settlement(stream.total_amount, vested, stream.withdrawn);
 
         // Freeze the stream at the vested amount. With the total reduced to
@@ -318,8 +326,9 @@ impl StreamContract {
             );
         }
 
-        events::Cancelled {
-            sender: stream.sender.clone(),
+        events::publish_cancelled(
+            &env,
+            &stream.sender,
             id,
             recipient_amount: settlement.recipient_remaining,
             sender_refund: settlement.refund,
@@ -358,13 +367,7 @@ impl StreamContract {
     /// ```
     pub fn withdrawable(env: Env, id: u64) -> Result<i128, StreamError> {
         let stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
-        let vested = vesting::vested_amount(
-            stream.total_amount,
-            stream.start_time,
-            stream.end_time,
-            stream.cliff_time,
-            env.ledger().timestamp(),
-        );
+        let vested = stream.vested_amount(env.ledger().timestamp());
         Ok(vesting::withdrawable_amount(vested, stream.withdrawn))
     }
 
@@ -377,13 +380,7 @@ impl StreamContract {
     /// ```
     pub fn vested(env: Env, id: u64) -> Result<i128, StreamError> {
         let stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
-        Ok(vesting::vested_amount(
-            stream.total_amount,
-            stream.start_time,
-            stream.end_time,
-            stream.cliff_time,
-            env.ledger().timestamp(),
-        ))
+        Ok(stream.vested_amount(env.ledger().timestamp()))
     }
 
     /// Amount not yet vested: the portion still locked in the contract that the
@@ -407,14 +404,8 @@ impl StreamContract {
     /// ```
     pub fn locked(env: Env, id: u64) -> Result<i128, StreamError> {
         let stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
-        let vested = vesting::vested_amount(
-            stream.total_amount,
-            stream.start_time,
-            stream.end_time,
-            stream.cliff_time,
-            env.ledger().timestamp(),
-        );
-        Ok(stream.total_amount - vested)
+        let vested = stream.vested_amount(env.ledger().timestamp());
+        Ok((stream.total_amount - vested).max(0))
     }
 
     /// Vesting progress in basis points, from 0 (nothing vested) to 10000
@@ -442,13 +433,7 @@ impl StreamContract {
         if stream.total_amount == 0 {
             return Ok(BPS_SCALE);
         }
-        let vested = vesting::vested_amount(
-            stream.total_amount,
-            stream.start_time,
-            stream.end_time,
-            stream.cliff_time,
-            env.ledger().timestamp(),
-        );
+        let vested = stream.vested_amount(env.ledger().timestamp());
         let scale = i128::from(BPS_SCALE);
         let progress = vested * scale / stream.total_amount;
         // The clamp keeps the value in 0..=BPS_SCALE, which always fits in u32.
@@ -504,13 +489,7 @@ fn withdraw_with(
     let mut stream = storage::get_stream(env, id).ok_or(StreamError::StreamNotFound)?;
     stream.recipient.require_auth();
 
-    let vested = vesting::vested_amount(
-        stream.total_amount,
-        stream.start_time,
-        stream.end_time,
-        stream.cliff_time,
-        env.ledger().timestamp(),
-    );
+    let vested = stream.vested_amount(env.ledger().timestamp());
     let amount = select(vesting::withdrawable_amount(vested, stream.withdrawn))?;
 
     stream.withdrawn += amount;
@@ -524,12 +503,7 @@ fn withdraw_with(
         amount,
     );
 
-    events::Withdrawn {
-        recipient: stream.recipient.clone(),
-        id,
-        amount,
-    }
-    .publish(env);
+    events::publish_withdrawn(env, &stream.recipient, id, amount);
 
     Ok(amount)
 }

@@ -14,12 +14,15 @@ all check: fmt-check lint test audit
 	./scripts/diff-interface.sh
 
 # Native debug build.
-build:
+build: ## Native debug build.
 	cargo build
 
 wasm: ## Optimised WASM artifact for deployment.
 	cargo build --release --target $(WASM_TARGET)
 	@echo "built $(WASM)"
+
+size: wasm ## Report the compiled contract's WASM size (builds it first if needed).
+	@echo "$(WASM): $$(wc -c < $(WASM) | tr -d ' ') bytes ($$(du -h $(WASM) | cut -f1))"
 
 test: ## Run the full test suite.
 	cargo test
@@ -33,8 +36,11 @@ fmt-check: ## Verify formatting without modifying files (used in CI).
 lint: ## Lint every target and treat warnings as errors.
 	cargo clippy --all-targets -- -D warnings
 
+docs: ## Build crate documentation, treating warnings as errors.
+	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+
 audit: ## Audit dependencies for known vulnerabilities.
-	cargo audit --deny warnings
+	cargo audit --deny warnings --file .cargo/audit.toml
 
 clean: ## Remove build artifacts.
 	cargo clean
