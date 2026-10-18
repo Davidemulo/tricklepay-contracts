@@ -161,4 +161,218 @@ address-to-stream-id mapping from their topics. The contract exposes no
 - **Related References**:
   - See the detailed discussion in the [Amount Ceiling section of the README](../README.md#amount-ceiling).
 
+
+## ADR: Accept Any Token Address Without an Allowlist
+
+**Status:** Accepted
+
+### Context
+
+`create_stream` accepts a caller-supplied `token: Address` with no
+restrictions. The contract performs no allowlist check, no registry lookup, and
+no verification of the token's implementation beyond confirming that it responds
+to a `transfer` call. Every stream stores the token address it was created with
+and invokes that same address — with the contract's own authority — for
+`withdraw`, `withdraw_amount`, and `cancel` for the entire life of the stream.
+
+This means a sender can open a stream with any Soroban contract address,
+including one that does not conform to SEP-41, charges an undisclosed fee,
+reenters the stream contract from within a transfer hook, or always fails and
+makes the stream permanently illiquid. The [Trust assumptions about the token
+contract](../THREAT_MODEL.md#trust-assumptions-about-the-token-contract) section
+of the threat model spends a full page documenting what a hostile or defective
+token can do: silent short-transfers, reentrancy, permanent locking, and
+balance-accounting disagreements. That is a major security consequence, and it
+is a deliberate choice.
+
+### Decision
+
+The stream contract accepts any token address and performs no allowlist,
+registry, or conformance checks. Token quality is entirely the sender's
+responsibility at creation time. The contract offers no protection against a
+malicious or broken token, and neither party can change the token on an
+existing stream.
+
+### Alternatives considered
+
+1. **A hardcoded allowlist of known-good tokens in the contract.** Rejected:
+   requires the contract to know every legitimate token in advance, which
+   cannot scale across every asset on Stellar or every custom token a project
+   might issue. An allowlist would have to be updated with every new token
+   deployment, which conflicts with the immutability design (see [ADR:
+   Immutable Architecture with No Admin or
+   Initializer](#adr-immutable-architecture-with-no-admin-or-initializer)).
+   Updating the allowlist would require redeployment — at which point the old
+   contract still exists with the old list, so streams on the old deployment
+   cannot benefit from the expanded coverage. A hardcoded list introduces a
+   central gatekeeper role this contract was designed not to have.
+
+2. **A registry contract that the stream contract queries.** Rejected for the
+   same central-authority reason as (1), but with an additional failure mode:
+   if the registry contract itself is upgraded, paused, or compromised, every
+   stream contract that depends on it inherits that single point of failure.
+   The registry becomes a shared choke point, and its trust assumptions
+   propagate to every deployment that calls it. A registry also adds a
+   cross-contract call to every `create_stream` invocation, which costs fees
+   and latency, and introduces a new class of failure (registry unavailable,
+   registry returns stale data) that the sender cannot control.
+
+3. **A token conformance check run at `create_stream` time** — for example,
+   attempting a zero-value transfer and verifying the result matches
+   expectations. Rejected: a well-behaved zero-value dry run does not prove the
+   token will behave correctly under load, with real amounts, or in the future.
+   A token that passes a creation-time check can still fail later, charge an
+   undisclosed fee, or reenter maliciously during an actual withdrawal. The
+   check gives false confidence without eliminating the real risk. Additionally,
+   Soroban's environment has no try-catch or safe sub-invocation primitive that
+   would let the contract attempt a transfer and recover cleanly from a trap or
+   reentrancy, so running a test transfer means accepting whatever side effects
+   it triggers — which is itself a security risk if the token being tested is
+   hostile.
+
+4. **Accept any token address (chosen).** The sender chooses the token at
+   `create_stream` time and is responsible for verifying it beforehand. The
+   contract trusts the token's transfer call to do exactly what SEP-41 specifies
+   and nothing more. If the token violates that, the stream's behavior is
+   undefined and the contract offers no remedy. This is explicit: token quality
+   is not the contract's concern, and the threat model documents exactly what
+   can go wrong when a sender picks a bad one. The contract stays minimal, has
+   no privileged decision-maker, and does not add cross-contract dependencies or
+   a false-security check.
+
+### Consequences
+
+- **Sender due diligence is mandatory.** Before creating a stream, a sender
+  must verify the token conforms to SEP-41, does not charge a transfer fee,
+  does not reenter from transfer hooks, and has no issuer controls (freeze,
+  claw back, mint-on-transfer) that could break the stream's accounting. The
+  contract does none of this checking and provides no safety net if the sender
+  skips it.
+- **Token choice is irreversible.** Once a stream is created with a given
+  token address, neither party can change it. If the token is later discovered
+  to be defective, the only recourse is for the sender to cancel (returning the
+  unvested portion) or for the recipient to withdraw whatever has already
+  vested, but the stream itself cannot be migrated to a different token
+  contract.
+- **No central gatekeeper.** The contract never consults an allowlist,
+  registry, or admin before accepting a token. Anyone can stream any Soroban
+  contract address. This is consistent with the immutability and no-admin
+  design (see [ADR: Immutable Architecture with No Admin or
+  Initializer](#adr-immutable-architecture-with-no-admin-or-initializer)), but
+  it means the contract cannot protect users from their own token choices.
+- **The threat model is the sender's responsibility to read.** The [Trust
+  assumptions about the token
+  contract](../THREAT_MODEL.md#trust-assumptions-about-the-token-contract)
+  section lists every failure mode a non-conforming token can cause. A sender
+  who does not read it and streams a hostile token has no claim the contract
+  failed to warn them.
+
+### Related references
+
+- [THREAT_MODEL.md § Trust assumptions about the token
+  contract](../THREAT_MODEL.md#trust-assumptions-about-the-token-contract) —
+  full explanation of what a hostile or defective token can do.
+- [INTEGRATOR_OPERATIONS.md § Token due diligence
+  checklist](#) (to be added) — short list of checks a sender should perform
+  before choosing a token.
+
+
+## ADR: Only `create_stream` Extends the Instance TTL
+
+**Status:** Accepted
+
+### Context
+
+Soroban contract storage is split into instance, temporary, and persistent
+regions, each with its own time-to-live (TTL) policy. The stream contract's
+instance storage holds `StreamCount`, the monotonic counter that assigns every
+new stream its unique id. If the instance storage expires and is archived,
+that counter becomes unavailable — which means `create_stream` cannot assign
+new ids, even if individual stream records (which live in persistent storage)
+are still accessible.
+
+The contract could extend the instance TTL on every entry point that touches
+storage, or only on specific ones. The current implementation extends it only
+in `create_stream` (`contracts/stream/src/storage.rs`,
+`extend_instance_ttl`). `withdraw`, `withdraw_amount`, `cancel`, and all
+read-only views do not extend it. A test
+(`contracts/stream/src/tests/storage.rs`,
+`withdraw_and_cancel_do_not_extend_the_instance_ttl`) pins this as intended
+behavior rather than an oversight.
+
+### Decision
+
+Only `create_stream` extends the instance TTL. No other entry point — mutating
+or read-only — does. A deployment that sees only withdrawals, cancellations,
+and view calls for longer than `ENTRY_TTL` (approximately 30 days) will let
+its instance storage expire, even if stream records remain live in persistent
+storage. Once the instance expires, new streams cannot be created until it is
+restored.
+
+### Alternatives considered
+
+1. **Extend on every entry point.** Rejected: every `withdraw`,
+   `withdraw_amount`, `cancel`, and view call would pay the fee and latency to
+   bump the instance TTL, even though the overwhelming majority of those calls
+   do not need `StreamCount` at all — only `create_stream` reads it. Extending
+   unconditionally would subsidize the cost of keeping `create_stream`
+   available with fees extracted from operations that derive no benefit from
+   it. The instance TTL would never expire on an active deployment, but
+   "active" would be measured by any call, not by stream-creation activity,
+   and users would pay for that insurance whether they need it or not.
+
+2. **Extend on mutating entry points only (`create_stream`, `withdraw`,
+   `withdraw_amount`, `cancel`).** Rejected for the same reason as (1), but
+   with a smaller fee surface: withdrawals and cancellations are more frequent
+   than creations on a mature deployment, so they would still carry most of
+   the subsidy cost. The rationale for excluding views — they do not need
+   `StreamCount` — applies equally to `withdraw`, `withdraw_amount`, and
+   `cancel`.
+
+3. **Extend only in `create_stream` (chosen).** The cost of keeping the
+   instance alive is paid only by the operation that actually needs it. A
+   deployment that creates streams regularly will keep its instance storage
+   live as a side effect of normal usage, with no additional cost. A deployment
+   that stops creating streams — because it has finished its use case, or
+   because it has been superseded by a newer deployment (see
+   [INTEGRATOR_OPERATIONS.md § Redeployment Without
+   Upgradeability](INTEGRATOR_OPERATIONS.md#redeployment-without-upgradeability))
+   — will let the instance expire naturally, which is correct: if no one is
+   creating streams, there is no reason to pay rent on the id counter. Existing
+   streams are unaffected, because stream records live in persistent storage
+   with their own independent TTL, extended by `get_stream` and `set_stream`
+   regardless of the instance's state (`contracts/stream/src/storage.rs`).
+
+### Consequences
+
+- **A quiet contract's instance will expire.** A deployment that sees no
+  `create_stream` calls for longer than `ENTRY_TTL` (roughly 30 days) will
+  have its instance storage archived. `withdraw`, `withdraw_amount`, `cancel`,
+  and all views will continue to work against existing streams — their records
+  are in persistent storage and are extended independently — but new streams
+  cannot be created until the instance is restored. This is the intended
+  behavior: a contract that is no longer creating streams does not need to pay
+  rent on the id counter.
+- **Restoration is a separate, explicit step.** If the instance expires, the
+  next `create_stream` attempt will fail until someone submits a restoration
+  transaction for the instance entry. Soroban RPCs and clients handle this
+  automatically through simulation and fee estimation, but it is a distinct
+  operation with its own fee. A deployment operator planning to create a new
+  stream after a long gap should expect this one-time restore cost.
+- **Per-operation costs stay minimal.** Withdrawals, cancellations, and views
+  do not pay to extend storage they do not need. The instance TTL cost is borne
+  only by `create_stream`, which is the entry point that derives value from it.
+
+### Related references
+
+- `contracts/stream/src/storage.rs`, `extend_instance_ttl` — the implementation
+  that `create_stream` calls and no other entry point does.
+- `contracts/stream/src/tests/storage.rs`,
+  `withdraw_and_cancel_do_not_extend_the_instance_ttl` — the test that verifies
+  this policy holds.
+- [INTEGRATOR_OPERATIONS.md § Maximum Practical Stream
+  Duration](INTEGRATOR_OPERATIONS.md#maximum-practical-stream-duration) —
+  explains the TTL policy's impact on stream records themselves (which have
+  their own, independent TTL in persistent storage).
+
   
