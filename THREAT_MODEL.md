@@ -199,6 +199,22 @@ call back into this contract, and either succeeds or fails atomically with no
 partial effect. The stream contract does not re-check the resulting balances
 after a transfer; it trusts the token's own accounting.
 
+### Decision: deposit verification by balance difference
+
+**The contract does not verify deposits by reading the token balance before and after transfer.**
+
+`create_stream` calls `TokenClient::transfer(&sender, &contract_address, &total_amount)` and immediately writes the stream record with that same `total_amount`, trusting the token to have moved exactly what was requested. The contract never calls `TokenClient::balance(&contract_address)` to confirm the actual deposit amount.
+
+**What this protects against:** A fee-on-transfer token (one that deducts a percentage on every transfer, common on some EVM chains but not part of the SEP-41 standard) would deposit less than `total_amount` into the contract while the stream record claims the full amount. The shortfall would remain undetected until the final withdrawal fails due to insufficient contract balance, potentially months or years after creation. Reading the contract's balance before and after the transfer — `let before = token.balance(&contract_address); token.transfer(...); let after = token.balance(&contract_address); let actual = after - before;` — and using `actual` as the stream's `total_amount` instead of the caller's parameter would catch the discrepancy at creation.
+
+**Cost of the check:** Two additional cross-contract `balance` calls per `create_stream` invocation. Each call incurs host function overhead, ledger entry read cost (the token contract's balance storage for this contract's address), and CPU time. The exact cost depends on the token implementation, but for a standard Stellar Asset Contract it adds roughly 0.2–0.5 ms and a small amount of ledger read fees. These are per-creation costs paid by the sender; they do not compound over the stream's lifetime.
+
+**Decision rationale:** The contract rejects balance verification in favor of trusting the token interface. SEP-41 tokens do not charge fees on transfer — the standard specifies that `transfer(from, to, amount)` moves exactly `amount` or fails. A token that violates this by silently deducting a fee is non-conforming, and accommodating it would impose costs on every conforming-token user to protect against a scenario that should not exist in the Stellar Asset Contract ecosystem. Fee-on-transfer tokens are an EVM-specific hazard; Stellar Asset Contracts have no precedent for them, and the Soroban SDK's `TokenClient` interface does not expose a return value from `transfer` that would report the actual amount moved.
+
+**Sender responsibility:** Choosing a token is entirely the sender's decision, made at `create_stream` time. A sender who streams a non-conforming token that silently deducts fees accepts the risk that the stream will fail on final withdrawal. The contract enforces no token allowlist and performs no runtime conformance check beyond confirming the address responds to a transfer call. Senders streaming significant value should verify the token is a genuine Stellar Asset Contract or a well-audited custom token before creating long-duration streams.
+
+**Compatibility note:** Changing this decision — adding balance verification — would be a behavioral change affecting gas cost and execution time for every `create_stream` call. It would not break the interface signature, but it would alter the operational cost profile in a way integrators measuring and optimizing for gas costs would notice. The decision to trust the token is therefore locked in as part of the contract's deployed behavior.
+
 **What a hostile or broken token can do.** Because the token is invoked with
 the stream contract's own authority (the contract is the token's caller for
 outgoing transfers), a token that violates these assumptions can affect that
