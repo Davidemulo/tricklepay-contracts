@@ -276,4 +276,103 @@ existing stream.
   checklist](#) (to be added) — short list of checks a sender should perform
   before choosing a token.
 
+
+## ADR: Only `create_stream` Extends the Instance TTL
+
+**Status:** Accepted
+
+### Context
+
+Soroban contract storage is split into instance, temporary, and persistent
+regions, each with its own time-to-live (TTL) policy. The stream contract's
+instance storage holds `StreamCount`, the monotonic counter that assigns every
+new stream its unique id. If the instance storage expires and is archived,
+that counter becomes unavailable — which means `create_stream` cannot assign
+new ids, even if individual stream records (which live in persistent storage)
+are still accessible.
+
+The contract could extend the instance TTL on every entry point that touches
+storage, or only on specific ones. The current implementation extends it only
+in `create_stream` (`contracts/stream/src/storage.rs`,
+`extend_instance_ttl`). `withdraw`, `withdraw_amount`, `cancel`, and all
+read-only views do not extend it. A test
+(`contracts/stream/src/tests/storage.rs`,
+`withdraw_and_cancel_do_not_extend_the_instance_ttl`) pins this as intended
+behavior rather than an oversight.
+
+### Decision
+
+Only `create_stream` extends the instance TTL. No other entry point — mutating
+or read-only — does. A deployment that sees only withdrawals, cancellations,
+and view calls for longer than `ENTRY_TTL` (approximately 30 days) will let
+its instance storage expire, even if stream records remain live in persistent
+storage. Once the instance expires, new streams cannot be created until it is
+restored.
+
+### Alternatives considered
+
+1. **Extend on every entry point.** Rejected: every `withdraw`,
+   `withdraw_amount`, `cancel`, and view call would pay the fee and latency to
+   bump the instance TTL, even though the overwhelming majority of those calls
+   do not need `StreamCount` at all — only `create_stream` reads it. Extending
+   unconditionally would subsidize the cost of keeping `create_stream`
+   available with fees extracted from operations that derive no benefit from
+   it. The instance TTL would never expire on an active deployment, but
+   "active" would be measured by any call, not by stream-creation activity,
+   and users would pay for that insurance whether they need it or not.
+
+2. **Extend on mutating entry points only (`create_stream`, `withdraw`,
+   `withdraw_amount`, `cancel`).** Rejected for the same reason as (1), but
+   with a smaller fee surface: withdrawals and cancellations are more frequent
+   than creations on a mature deployment, so they would still carry most of
+   the subsidy cost. The rationale for excluding views — they do not need
+   `StreamCount` — applies equally to `withdraw`, `withdraw_amount`, and
+   `cancel`.
+
+3. **Extend only in `create_stream` (chosen).** The cost of keeping the
+   instance alive is paid only by the operation that actually needs it. A
+   deployment that creates streams regularly will keep its instance storage
+   live as a side effect of normal usage, with no additional cost. A deployment
+   that stops creating streams — because it has finished its use case, or
+   because it has been superseded by a newer deployment (see
+   [INTEGRATOR_OPERATIONS.md § Redeployment Without
+   Upgradeability](INTEGRATOR_OPERATIONS.md#redeployment-without-upgradeability))
+   — will let the instance expire naturally, which is correct: if no one is
+   creating streams, there is no reason to pay rent on the id counter. Existing
+   streams are unaffected, because stream records live in persistent storage
+   with their own independent TTL, extended by `get_stream` and `set_stream`
+   regardless of the instance's state (`contracts/stream/src/storage.rs`).
+
+### Consequences
+
+- **A quiet contract's instance will expire.** A deployment that sees no
+  `create_stream` calls for longer than `ENTRY_TTL` (roughly 30 days) will
+  have its instance storage archived. `withdraw`, `withdraw_amount`, `cancel`,
+  and all views will continue to work against existing streams — their records
+  are in persistent storage and are extended independently — but new streams
+  cannot be created until the instance is restored. This is the intended
+  behavior: a contract that is no longer creating streams does not need to pay
+  rent on the id counter.
+- **Restoration is a separate, explicit step.** If the instance expires, the
+  next `create_stream` attempt will fail until someone submits a restoration
+  transaction for the instance entry. Soroban RPCs and clients handle this
+  automatically through simulation and fee estimation, but it is a distinct
+  operation with its own fee. A deployment operator planning to create a new
+  stream after a long gap should expect this one-time restore cost.
+- **Per-operation costs stay minimal.** Withdrawals, cancellations, and views
+  do not pay to extend storage they do not need. The instance TTL cost is borne
+  only by `create_stream`, which is the entry point that derives value from it.
+
+### Related references
+
+- `contracts/stream/src/storage.rs`, `extend_instance_ttl` — the implementation
+  that `create_stream` calls and no other entry point does.
+- `contracts/stream/src/tests/storage.rs`,
+  `withdraw_and_cancel_do_not_extend_the_instance_ttl` — the test that verifies
+  this policy holds.
+- [INTEGRATOR_OPERATIONS.md § Maximum Practical Stream
+  Duration](INTEGRATOR_OPERATIONS.md#maximum-practical-stream-duration) —
+  explains the TTL policy's impact on stream records themselves (which have
+  their own, independent TTL in persistent storage).
+
   
