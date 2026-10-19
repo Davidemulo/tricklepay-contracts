@@ -839,3 +839,36 @@ fn stream_created_at_current_ledger_time_vests_from_zero() {
     assert_eq!(t.contract.status(&id), StreamStatus::Streaming);
     assert_eq!(t.token.balance(&t.contract.address), 1_000);
 }
+
+/// The token contract itself may act as a stream participant (sender or
+/// recipient) to preserve smart contract composability. This protects the
+/// README's statement: "A token contract acting as the `sender` or `recipient`
+/// is permitted. Rejecting this could break legitimate smart contract
+/// composability."
+#[test]
+fn token_contract_may_be_a_stream_recipient() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    // The token contract address is the recipient; only the stream contract
+    // itself is refused.
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.token_address,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    assert_eq!(t.contract.stream_count(), 1);
+    assert_eq!(t.token.balance(&t.sender), 0);
+    assert_eq!(t.token.balance(&t.contract.address), 1_000);
+
+    let stream = t.contract.get_stream(&id);
+    assert_eq!(stream.sender, t.sender);
+    assert_eq!(stream.recipient, t.token_address);
+    assert_eq!(stream.token, t.token_address);
+    assert_eq!(stream.total_amount, 1_000);
+}

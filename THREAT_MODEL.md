@@ -225,15 +225,17 @@ stream's participants:
   success while the recipient received less than the vesting math promised.
   Stream accounting (`withdrawn`, `total_amount`) is unaffected by the actual
   transferred amount, only by what was requested.
-- **Reentrancy.** A token whose `transfer` invokes back into this contract
-  (for example, from a hook on the recipient) executes before this contract's
-  own state write completes for `create_stream` (transfer precedes the write)
-  but after it for `withdraw`/`withdraw_amount`/`cancel` (see the ordering
-  note below) — a reentrant call in the latter case would read `stream.withdrawn`
-  already updated for the in-flight withdrawal, so a second, concurrent
-  withdrawal of the same accrued balance is not possible. It could still
-  interleave with the schedule (e.g., trigger a `cancel`) in ways not exercised
-  by the test suite.
+- **Reentrancy.** Soroban rejects direct re-entry into a contract already on
+  the call stack. A token whose `transfer` attempts to call back into this
+  contract (for example, by calling `withdraw` or `cancel` from a transfer
+  hook) fails with a host `InvalidAction` error, aborting the entire
+  transaction including the original operation that triggered the transfer.
+  This is verified by the `token_reentrancy_during_withdraw_is_rejected` and
+  `token_reentrancy_during_cancel_is_rejected` tests in
+  `contracts/stream/src/tests/reentrancy.rs`. The protection is enforced by
+  the Soroban host, not by this contract's own logic, so no state is left
+  inconsistent: the re-entrant call never executes, and the original call is
+  rolled back completely.
 - **A token that never returns / always fails.** Every stream created with
   that token becomes permanently illiquid — no `withdraw`, `withdraw_amount`,
   or `cancel` can complete, because each aborts the whole call the same way
