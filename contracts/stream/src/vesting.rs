@@ -368,5 +368,32 @@ mod proptests {
             };
             prop_assert_eq!(withdrawable_amount(v, wd), v - wd);
         }
+
+        /// Settlement must account for the whole escrow: the refund plus the
+        /// recipient's remaining share plus what has already been withdrawn
+        /// must equal the total amount.
+        #[test]
+        fn settlement_accounts_for_the_whole_escrow(
+            total in 0i128..=i64::MAX as i128,
+            vested in 0i128..=i64::MAX as i128,
+            withdrawn in 0i128..=i64::MAX as i128,
+        ) {
+            // Constrain inputs to valid ranges: withdrawn <= vested <= total.
+            let vested = vested.min(total);
+            let withdrawn = withdrawn.min(vested);
+
+            let s = settlement(total, vested, withdrawn);
+
+            // The three amounts must sum to the total.
+            prop_assert_eq!(
+                s.refund + s.recipient_remaining + withdrawn,
+                total,
+                "settlement must account for the entire escrow"
+            );
+
+            // Neither part may be negative.
+            prop_assert!(s.refund >= 0, "refund must be non-negative");
+            prop_assert!(s.recipient_remaining >= 0, "recipient_remaining must be non-negative");
+        }
     }
 }
