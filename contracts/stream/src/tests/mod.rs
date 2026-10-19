@@ -14,6 +14,7 @@
 //! | `storage`         | `DataKey` encoding, persistent and instance TTL bumps         |
 //! | `auth`            | Authorization requirements for every mutating entry point     |
 //! | `proptest_escrow` | Property tests for escrow balance invariant                   |
+//! | `reentrancy`      | Token re-entrancy protection tests                            |
 
 pub mod helpers;
 
@@ -22,6 +23,7 @@ mod cancellation;
 mod creation;
 mod events;
 mod proptest_escrow;
+mod reentrancy;
 mod storage;
 mod views;
 mod withdrawal;
