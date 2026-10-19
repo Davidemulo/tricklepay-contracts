@@ -45,7 +45,7 @@ impl ReentrantToken {
 
         // Store call context to detect re-entrancy attempt.
         let key = String::from_str(&env, "reentrancy_target");
-        if let Some(stream_contract): Option<Address> = env.storage().temporary().get(&key) {
+        if let Some(stream_contract) = env.storage().temporary().get::<_, Address>(&key) {
             // Attempt to re-enter: try to withdraw or cancel during the transfer.
             let stream_client = StreamContractClient::new(&env, &stream_contract);
             
