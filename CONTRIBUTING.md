@@ -226,6 +226,10 @@ Conventions the suite expects:
   for boundary cases no entry point can reach; read the fixture in
   `tests/helpers.rs` before duplicating one of them.
 
+When a property test finds a failing input, commit its generated file from
+`proptest-regressions/` together with the fix for that failure. Keeping the
+seed lets Proptest replay the regression for every contributor.
+
 For events, use the fixture helpers instead of decoding XDR by hand:
 `event_publishers()` returns who published the latest invocation's events in
 order (the token contract's transfer, then the stream contract's own event),

@@ -11,7 +11,6 @@ fix.md
 
 # Auto-generated test and coverage output
 test_snapshots/
-proptest-regressions/
 coverage/
 *.profraw
 *.profdata
