@@ -34,6 +34,20 @@ wasm: ## Optimised WASM artifact for deployment.
 	cargo build --release --target $(WASM_TARGET)
 	@echo "built $(WASM)"
 
+.PHONY: wasm-hash
+wasm-hash: ## Build the WASM with the locked dependencies and print its SHA-256 hash.
+	@set -eu; \
+	cargo build --locked --release --target "$(WASM_TARGET)"; \
+	if command -v sha256sum >/dev/null 2>&1; then \
+		hash=$$(sha256sum "$(WASM)" | awk '{print $$1}'); \
+	elif command -v shasum >/dev/null 2>&1; then \
+		hash=$$(shasum -a 256 "$(WASM)" | awk '{print $$1}'); \
+	else \
+		echo "Error: install sha256sum or shasum to compute the WASM SHA-256 hash." >&2; \
+		exit 1; \
+	fi; \
+	printf 'sha256:%s\n' "$$hash"
+
 size: wasm ## Report the compiled contract's WASM size (builds it first if needed).
 	@echo "$(WASM): $$(wc -c < $(WASM) | tr -d ' ') bytes ($$(du -h $(WASM) | cut -f1))"
 

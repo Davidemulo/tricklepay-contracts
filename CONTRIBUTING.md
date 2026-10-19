@@ -339,11 +339,9 @@ fixed schedule.
      and open a new, empty `## [Unreleased]` section above it for whatever
      comes next.
    - Bump `version` in the workspace `Cargo.toml` to match.
-   - Run `make wasm` and record the resulting
-     `target/wasm32v1-none/release/tricklepay_stream.wasm` SHA-256 hash
-     (`sha256sum target/wasm32v1-none/release/tricklepay_stream.wasm`) in the
-     tag annotation — this is the hash anyone can later check a live
-     deployment against (see
+   - Run `make wasm-hash` and record its `sha256:` output in the tag
+     annotation — this is the hash anyone can later check a live deployment
+     against (see
      [Verifying a deployment](README.md#verifying-a-deployment)).
 4. Tag that commit with an annotated tag, `vX.Y.Z`
    (`git tag -a vX.Y.Z -m "..."`), and push it (`git push origin vX.Y.Z`).

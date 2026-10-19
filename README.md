@@ -850,10 +850,12 @@ deployed binary used. The pinned toolchain in `rust-toolchain.toml` ensures
 this, but only if you have not overridden it:
 
 ```bash
-cargo build --release --target wasm32v1-none
+make wasm-hash
 ```
 
-The optimised artifact is written to
+This builds the optimised artifact with locked dependencies and prints its
+SHA-256 hash in a `sha256:`-prefixed format. The target supports `sha256sum`
+and `shasum -a 256`. The artifact is written to
 `target/wasm32v1-none/release/tricklepay_stream.wasm`.
 
 **Why `wasm32v1-none`?** On Rust 1.82 and later, the familiar
@@ -865,12 +867,6 @@ supported target that avoids those extensions and produces a module the
 Soroban environment accepts. If you build with the wrong target, Soroban
 fails with a `WasmVm` error about unsupported `reference-types` or
 `multi-value` features.
-
-Compute its SHA-256 hash:
-
-```bash
-sha256sum target/wasm32v1-none/release/tricklepay_stream.wasm
-```
 
 ### Step 2 — fetch the on-chain bytecode hash
 
