@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use soroban_sdk::{contract, contractimpl, testutils::Address as _, token, Address, Env, String};
+use soroban_sdk::{contract, contractimpl, testutils::Address as _, Address, Env, String};
 
 use crate::contract::{StreamContract, StreamContractClient};
 
@@ -10,35 +10,10 @@ use super::helpers::StreamTest;
 #[contract]
 struct ReentrantToken;
 
-/// Client generated for the hostile token.
-#[allow(dead_code)]
-pub struct ReentrantTokenClient<'a> {
-    env: &'a Env,
-    address: Address,
-}
-
-#[allow(dead_code)]
-impl<'a> ReentrantTokenClient<'a> {
-    pub fn new(env: &'a Env, address: &Address) -> Self {
-        ReentrantTokenClient {
-            env,
-            address: address.clone(),
-        }
-    }
-
-    pub fn set_reentrancy_target(&self, stream_contract: &Address) {
-        self.env.invoke_contract(
-            &self.address,
-            &soroban_sdk::symbol_short!("set_reentrancy_target"),
-            soroban_sdk::vec![self.env, stream_contract],
-        )
-    }
-}
-
 #[contractimpl]
 impl ReentrantToken {
     /// Standard token transfer that attempts to re-enter the stream contract.
-    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+    pub fn transfer(env: Env, from: Address, _to: Address, _amount: i128) {
         from.require_auth();
 
         // Store call context to detect re-entrancy attempt.
@@ -67,14 +42,9 @@ impl ReentrantToken {
 /// stack. This test verifies what happens when a token attempts to call back
 /// into the stream contract during a transfer.
 ///
-/// The threat model states: "A token whose `transfer` invokes back into this
-/// contract (for example, from a hook on the recipient) executes before this
-/// contract's own state write completes for `create_stream` (transfer precedes
-/// the write) but after it for `withdraw`/`withdraw_amount`/`cancel` [...] —
-/// a reentrant call in the latter case would read `stream.withdrawn` already
-/// updated for the in-flight withdrawal, so a second, concurrent withdrawal of
-/// the same accrued balance is not possible. It could still interleave with the
-/// schedule (e.g., trigger a `cancel`) in ways not exercised by the test suite."
+/// The threat model states: "Soroban rejects direct re-entry into a contract
+/// already on the call stack. A token whose `transfer` attempts to call back
+/// into this contract [...] fails with a host `InvalidAction` error."
 #[test]
 #[should_panic(expected = "HostError: Error(Context, InvalidAction)")]
 fn token_reentrancy_during_withdraw_is_rejected() {
