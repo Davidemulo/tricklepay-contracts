@@ -454,6 +454,11 @@ make deploy ID=alice  # deploy to testnet using a Stellar CLI identity
 > `.cargo/audit.toml` because they are not compiled into the deployed WASM.
 > See [`.cargo/AUDIT.md`](.cargo/AUDIT.md) for the full explanation.
 
+The release profile keeps Rust overflow checks enabled. This makes arithmetic
+such as `stream.withdrawn += amount` abort on overflow instead of wrapping, so
+removing `overflow-checks = true` would remove a safety check from contract
+balance updates.
+
 ### Reading the test suite
 
 The suite is organised by behaviour, not by entry point, so a failing test
