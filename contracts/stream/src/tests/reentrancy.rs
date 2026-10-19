@@ -1,6 +1,10 @@
 #![cfg(test)]
 
-use soroban_sdk::{contract, contractimpl, testutils::Address as _, Address, Env, String};
+use soroban_sdk::{
+    contract, contractimpl,
+    testutils::{Address as _, Ledger as _},
+    Address, Env, String,
+};
 
 use crate::contract::{StreamContract, StreamContractClient};
 
