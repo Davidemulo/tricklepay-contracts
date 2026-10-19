@@ -429,6 +429,7 @@ All common contributor tasks are wrapped in the `Makefile`. Run `make` (or
   fmt        Format the workspace in place (cargo fmt).
   fmt-check  Verify formatting without modifying files (used in CI).
   lint       Lint every target and treat warnings as errors (cargo clippy -D warnings).
+  lint-scripts  Check shell syntax and lint scripts with ShellCheck.
   audit      Audit dependencies for known vulnerabilities (cargo audit --deny warnings).
   clean      Remove build artifacts (cargo clean).
   deploy     Build, install, and deploy to testnet. Pass an identity: make deploy ID=alice
@@ -441,6 +442,7 @@ make check          # formatting + lints + tests (mirrors CI)
 make test           # run the test suite only
 make fmt            # auto-format all Rust source files
 make wasm           # produce the release WASM ready for deployment
+make lint-scripts   # check scripts/*.sh with bash -n and ShellCheck
 make audit          # check for vulnerable or unmaintained dependencies
 make deploy ID=alice  # deploy to testnet using a Stellar CLI identity
 ```
