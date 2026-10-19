@@ -1,8 +1,6 @@
 #![cfg(test)]
 
-use soroban_sdk::{
-    contract, contractimpl, testutils::Address as _, token, Address, Env, String,
-};
+use soroban_sdk::{contract, contractimpl, testutils::Address as _, token, Address, Env, String};
 
 use crate::contract::{StreamContract, StreamContractClient};
 
@@ -48,7 +46,7 @@ impl ReentrantToken {
         if let Some(stream_contract) = env.storage().temporary().get::<_, Address>(&key) {
             // Attempt to re-enter: try to withdraw or cancel during the transfer.
             let stream_client = StreamContractClient::new(&env, &stream_contract);
-            
+
             // Try to call withdraw on stream id 0.
             let _ = stream_client.try_withdraw(&0);
         }
@@ -61,9 +59,7 @@ impl ReentrantToken {
     pub fn set_reentrancy_target(env: Env, stream_contract: Address) {
         let key = String::from_str(&env, "reentrancy_target");
         env.storage().temporary().set(&key, &stream_contract);
-        env.storage()
-            .temporary()
-            .extend_ttl(&key, 100_000, 100_000);
+        env.storage().temporary().extend_ttl(&key, 100_000, 100_000);
     }
 }
 

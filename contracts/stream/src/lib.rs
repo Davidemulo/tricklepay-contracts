@@ -62,10 +62,7 @@ pub use types::{Stream, StreamStatus};
 use soroban_sdk::contractmeta;
 
 // Embed contract metadata for on-chain inspection via stellar contract info meta
-contractmeta!(
-    key = "version",
-    val = env!("CARGO_PKG_VERSION")
-);
+contractmeta!(key = "version", val = env!("CARGO_PKG_VERSION"));
 
 contractmeta!(
     key = "repository",
