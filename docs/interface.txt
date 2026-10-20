@@ -167,6 +167,64 @@ Contract Spec:
          ],
      )
 
+ • Function: stream_exists
+      Docs: Whether a stream record exists, including cancelled or completed streams.\n\nThis check does not modify storage or publish events.\n\n# Examples\n\n```ignore\nlet exists = client.stream_exists(&stream_id);\n```
+      Inputs: VecM(
+          [
+              ScSpecFunctionInputV0 {
+                  doc: StringM(),
+                  name: StringM(id),
+                  type_: U64,
+              },
+          ],
+      )
+      Output: VecM(
+          [
+              Bool,
+          ],
+      )
+
+ • Function: vested_at
+      Docs: Total amount vested by `timestamp`, including anything already withdrawn.\n\nTimes before the start or cliff return zero. At or after the end the full\namount is vested. A cancelled stream remains frozen at its cancellation\namount for timestamps at or after cancellation.\n\n# Examples\n\n```ignore\nlet projected = client.vested_at(&stream_id, &1_700_086_400);\n```
+      Inputs: VecM(
+          [
+              ScSpecFunctionInputV0 {
+                  doc: StringM(),
+                  name: StringM(id),
+                  type_: U64,
+              },
+              ScSpecFunctionInputV0 {
+                  doc: StringM(),
+                  name: StringM(timestamp),
+                  type_: U64,
+              },
+          ],
+      )
+      Output: VecM(
+          [
+              Result(
+                  ScSpecTypeResult {
+                      ok_type: I128,
+                      error_type: Udt(
+                          ScSpecTypeUdt {
+                              name: StringM(StreamError),
+                          },
+                      ),
+                  },
+              ),
+          ],
+      )
+
+ • Function: max_amount
+      Docs: Maximum amount accepted by `create_stream`, in the token's smallest unit.\n\n# Examples\n\n```ignore\nlet maximum = client.max_amount();\nassert_eq!(maximum, i64::MAX as i128);\n```
+      Inputs: VecM(
+          [],
+      )
+      Output: VecM(
+          [
+              I128,
+          ],
+      )
  • Function: locked
      Docs: Amount not yet vested: the portion still locked in the contract that the\nrecipient cannot withdraw yet.\n\nLocked behavior across stream lifecycle:\n- Before `start_time` or `cliff_time`: returns `total_amount` (entire amount locked).\n- Between `start_time` and `end_time`: decreases linearly as tokens vest (`total_amount - vested`).\n- At or after `end_time`: returns `0` (0% locked).\n- A cancelled stream returns `0` because cancellation freezes `total_amount` at `vested`.\n\nRejections and Error Behavior:\n- Returns [`StreamError::StreamNotFound`] if `id` does not exist in storage\n(e.g. an unknown id or an id from a creation call rejected for invalid participants).\n- `locked` is a read-only view function: it does not alter state or move tokens.\n\n# Examples\n\n```ignore\nlet remaining_locked = client.locked(&stream_id);\n```
      Inputs: VecM(
@@ -454,5 +512,4 @@ Contract Spec:
              ),
          ],
      )
-
 
