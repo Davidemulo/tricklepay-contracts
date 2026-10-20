@@ -22,6 +22,10 @@ pub const MAX_AMOUNT: i128 = i64::MAX as i128;
 /// Basis points in 100%, the scale [`StreamContract::progress`] reports on.
 pub const BPS_SCALE: u32 = 10_000;
 
+fn vested_amount_at(stream: &Stream, timestamp: u64) -> i128 {
+    stream.vested_amount(timestamp)
+}
+
 #[contract]
 pub struct StreamContract;
 
@@ -358,6 +362,19 @@ impl StreamContract {
         storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)
     }
 
+    /// Whether a stream record exists, including cancelled or completed streams.
+    ///
+    /// This check does not modify storage or publish events.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let exists = client.stream_exists(&stream_id);
+    /// ```
+    pub fn stream_exists(env: Env, id: u64) -> bool {
+        storage::has_stream(&env, id)
+    }
+
     /// Amount the recipient can withdraw right now.
     ///
     /// # Examples
@@ -380,7 +397,23 @@ impl StreamContract {
     /// ```
     pub fn vested(env: Env, id: u64) -> Result<i128, StreamError> {
         let stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
-        Ok(stream.vested_amount(env.ledger().timestamp()))
+        Ok(vested_amount_at(&stream, env.ledger().timestamp()))
+    }
+
+    /// Total amount vested by `timestamp`, including anything already withdrawn.
+    ///
+    /// Times before the start or cliff return zero. At or after the end the full
+    /// amount is vested. A cancelled stream remains frozen at its cancellation
+    /// amount for timestamps at or after cancellation.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let projected = client.vested_at(&stream_id, &1_700_086_400);
+    /// ```
+    pub fn vested_at(env: Env, id: u64, timestamp: u64) -> Result<i128, StreamError> {
+        let stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
+        Ok(vested_amount_at(&stream, timestamp))
     }
 
     /// Amount not yet vested: the portion still locked in the contract that the
@@ -475,6 +508,18 @@ impl StreamContract {
     /// ```
     pub fn stream_count(env: Env) -> u64 {
         storage::stream_count(&env)
+    }
+
+    /// Maximum amount accepted by `create_stream`, in the token's smallest unit.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let maximum = client.max_amount();
+    /// assert_eq!(maximum, i64::MAX as i128);
+    /// ```
+    pub fn max_amount(_env: Env) -> i128 {
+        MAX_AMOUNT
     }
 }
 
