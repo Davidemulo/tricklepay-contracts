@@ -48,6 +48,8 @@ SDK changes can affect the contract ABI or what the Soroban host accepts.
 ## How a stream works
 
 **All timestamps are Unix seconds.** The `start_time`, `end_time`, and `cliff_time` parameters are `u64` Unix timestamps in seconds, matching the Soroban ledger clock (`env.ledger().timestamp()`). A caller using milliseconds (such as JavaScript's `Date.now()`) would create a stream that appears to never start, since a timestamp like `1735689600000` (January 1, 2025 in milliseconds) is interpreted as a date billions of years in the future when read as seconds. The contract does not validate timestamp magnitude or convert units; the caller must ensure all times are in seconds.
+The decision to leave timestamp magnitude unbounded is recorded in
+[ADR: Do Not Bound Timestamp Magnitude](docs/ADR_TIMESTAMP_MAGNITUDE.md).
 
 **Concrete example:** To create a one-month stream starting on **January 1, 2025 at 00:00:00 UTC** and ending on **February 1, 2025 at 00:00:00 UTC**, convert both dates to Unix seconds:
 
@@ -429,6 +431,7 @@ All common contributor tasks are wrapped in the `Makefile`. Run `make` (or
   fmt        Format the workspace in place (cargo fmt).
   fmt-check  Verify formatting without modifying files (used in CI).
   lint       Lint every target and treat warnings as errors (cargo clippy -D warnings).
+  lint-scripts  Check shell syntax and lint scripts with ShellCheck.
   audit      Audit dependencies for known vulnerabilities (cargo audit --deny warnings).
   clean      Remove build artifacts (cargo clean).
   deploy     Build, install, and deploy to testnet. Pass an identity: make deploy ID=alice
@@ -441,6 +444,7 @@ make check          # formatting + lints + tests (mirrors CI)
 make test           # run the test suite only
 make fmt            # auto-format all Rust source files
 make wasm           # produce the release WASM ready for deployment
+make lint-scripts   # check scripts/*.sh with bash -n and ShellCheck
 make audit          # check for vulnerable or unmaintained dependencies
 make deploy ID=alice  # deploy to testnet using a Stellar CLI identity
 ```
@@ -449,6 +453,11 @@ make deploy ID=alice  # deploy to testnet using a Stellar CLI identity
 > Some transitive Soroban test-host dependencies are allowlisted in
 > `.cargo/audit.toml` because they are not compiled into the deployed WASM.
 > See [`.cargo/AUDIT.md`](.cargo/AUDIT.md) for the full explanation.
+
+The release profile keeps Rust overflow checks enabled. This makes arithmetic
+such as `stream.withdrawn += amount` abort on overflow instead of wrapping, so
+removing `overflow-checks = true` would remove a safety check from contract
+balance updates.
 
 ### Reading the test suite
 
@@ -850,10 +859,12 @@ deployed binary used. The pinned toolchain in `rust-toolchain.toml` ensures
 this, but only if you have not overridden it:
 
 ```bash
-cargo build --release --target wasm32v1-none
+make wasm-hash
 ```
 
-The optimised artifact is written to
+This builds the optimised artifact with locked dependencies and prints its
+SHA-256 hash in a `sha256:`-prefixed format. The target supports `sha256sum`
+and `shasum -a 256`. The artifact is written to
 `target/wasm32v1-none/release/tricklepay_stream.wasm`.
 
 **Why `wasm32v1-none`?** On Rust 1.82 and later, the familiar
@@ -865,12 +876,6 @@ supported target that avoids those extensions and produces a module the
 Soroban environment accepts. If you build with the wrong target, Soroban
 fails with a `WasmVm` error about unsupported `reference-types` or
 `multi-value` features.
-
-Compute its SHA-256 hash:
-
-```bash
-sha256sum target/wasm32v1-none/release/tricklepay_stream.wasm
-```
 
 ### Step 2 — fetch the on-chain bytecode hash
 
