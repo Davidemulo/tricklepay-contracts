@@ -330,13 +330,13 @@ impl StreamContract {
             );
         }
 
-        events::publish_cancelled(
-            &env,
-            &stream.sender,
+        events::Cancelled {
+            sender: stream.sender.clone(),
             id,
-            settlement.recipient_remaining,
-            settlement.refund,
-        );
+            recipient_amount: settlement.recipient_remaining,
+            sender_refund: settlement.refund,
+        }
+        .publish(&env);
 
         Ok(settlement.refund)
     }
@@ -468,7 +468,8 @@ impl StreamContract {
         let vested = stream.vested_amount(env.ledger().timestamp());
         let scale = i128::from(BPS_SCALE);
         let progress = vested * scale / stream.total_amount;
-        Ok(u32::try_from(progress.clamp(0, scale)).unwrap_or(0))
+        // The clamp keeps the value in 0..=BPS_SCALE, which always fits in u32.
+        Ok(u32::try_from(progress.clamp(0, scale)).expect("clamped progress fits in u32"))
     }
 
     /// Lifecycle status of a stream at the current ledger time.

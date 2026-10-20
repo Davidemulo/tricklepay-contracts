@@ -950,7 +950,7 @@ fn self_stream_is_accepted_and_behaves_normally() {
     // At t=1100, elapsed = 500 out of 1000, so vested = 250, refund = 250.
     assert_eq!(refund, 250);
     assert_eq!(t.token.balance(&self_address), 250);
-    assert_eq!(t.contract.get_stream(&id2).cancelled, true);
+    assert!(t.contract.get_stream(&id2).cancelled);
 
     // The self-address can still withdraw the vested portion from the cancelled stream.
     assert_eq!(t.contract.withdrawable(&id2), 250);
