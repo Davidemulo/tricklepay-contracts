@@ -49,6 +49,27 @@ cargo audit --deny warnings
 CI runs the same checks on every push and pull request. The audit command uses the
 allowlist in `.cargo/audit.toml`.
 
+The vesting and status property tests use Proptest's default 256 cases per
+property. To run more cases before a release or after changing property-tested
+logic, set `PROPTEST_CASES` for the test command:
+
+```bash
+PROPTEST_CASES=10000 cargo test
+```
+
+In PowerShell, use:
+
+```powershell
+$env:PROPTEST_CASES = "10000"; cargo test
+```
+
+When Proptest finds a failure, it saves the seed under the relevant source
+directory's `proptest-regressions/` folder (for example,
+`contracts/stream/src/proptest-regressions/` for the vesting and status
+properties). Proptest replays saved failures automatically when that property
+runs again. To rerun just one property, pass its test name to Cargo, for
+example `cargo test vested_between_zero_and_total`.
+
 If you intentionally changed the contract interface, update the snapshot before opening your PR:
 ```bash
 make wasm
@@ -225,6 +246,11 @@ Conventions the suite expects:
   introspection such as `stream_ttl`, `persistent_has`, and `set_stream_count`
   for boundary cases no entry point can reach; read the fixture in
   `tests/helpers.rs` before duplicating one of them.
+
+When a property test finds a failing input, force-add its generated file from
+`proptest-regressions/` together with the fix for that failure, using
+`git add -f <path-to-regression-file>`. These files are ignored by default, so
+force-adding is required to share the regression seed with every contributor.
 
 For events, use the fixture helpers instead of decoding XDR by hand:
 `event_publishers()` returns who published the latest invocation's events in
