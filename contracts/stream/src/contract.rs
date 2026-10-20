@@ -330,9 +330,8 @@ impl StreamContract {
             );
         }
 
-        events::publish_cancelled(
-            &env,
-            &stream.sender,
+        events::Cancelled {
+            sender: stream.sender.clone(),
             id,
             recipient_amount: settlement.recipient_remaining,
             sender_refund: settlement.refund,

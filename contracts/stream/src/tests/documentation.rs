@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 use crate::StreamError;
+use std::string::{String, ToString};
 
 const README: &str = include_str!("../../../../README.md");
 
@@ -13,7 +14,12 @@ fn readme_error_table_matches_stream_error_variants_and_codes() {
     let actual: std::vec::Vec<(String, u32)> = README
         .lines()
         .skip(error_heading + 1)
-        .skip_while(|line| !line.contains("| Code | Variant |"))
+        .skip_while(|line| {
+            let mut columns = line.split('|').map(str::trim);
+            columns.next() != Some("")
+                || columns.next() != Some("Code")
+                || columns.next() != Some("Variant")
+        })
         .skip(1)
         .take_while(|line| line.trim_start().starts_with('|'))
         .filter(|line| !line.contains("---"))

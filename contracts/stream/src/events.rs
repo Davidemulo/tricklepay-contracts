@@ -133,3 +133,13 @@ pub(crate) fn publish_created(env: &Env, id: u64, stream: &Stream) {
     }
     .publish(env);
 }
+
+/// Publish [`Withdrawn`] after tokens have been transferred to the recipient.
+pub(crate) fn publish_withdrawn(env: &Env, recipient: &Address, id: u64, amount: i128) {
+    Withdrawn {
+        recipient: recipient.clone(),
+        id,
+        amount,
+    }
+    .publish(env);
+}

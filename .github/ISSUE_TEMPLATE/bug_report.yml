@@ -55,7 +55,7 @@ body:
     attributes:
       label: Environment
       description: Rust toolchain, Soroban SDK version, and network (mainnet/testnet/standalone) you observed the bug on.
-      placeholder: "e.g. rust stable, soroban-sdk 25.x, testnet"
+      placeholder: "e.g. rust 1.84.0, soroban-sdk 22.x, testnet"
     validations:
       required: true
   - type: textarea

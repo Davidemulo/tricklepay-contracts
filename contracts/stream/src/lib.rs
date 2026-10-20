@@ -47,6 +47,9 @@
 //! For calculation details on linear vesting, see the [`vesting`] module, and
 //! for the lifecycle status rules see the [`status`] module.
 
+#[cfg(test)]
+extern crate std;
+
 mod contract;
 mod error;
 mod events;
