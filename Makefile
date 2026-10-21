@@ -3,15 +3,27 @@
 WASM_TARGET := wasm32v1-none
 WASM := target/$(WASM_TARGET)/release/tricklepay_stream.wasm
 
-.PHONY: all check build wasm test fmt fmt-check lint audit clean deploy help
+.PHONY: all check build wasm test fmt fmt-check lint audit clean deploy check-manifest check-markdown-links test-markdown-links snapshot help
 
 # help is the default target; running plain `make` lists available targets.
 .DEFAULT_GOAL := help
 
 # Run the same checks as CI in the same order: formatting, lints, tests.
 # Use this before opening a pull request.
-all check: fmt-check lint test audit
+all check: check-manifest fmt-check lint test audit
 	./scripts/diff-interface.sh
+
+check-manifest: ## Verify Cargo manifests parse without resolving remote dependencies.
+	cargo metadata --no-deps --locked
+
+check-markdown-links: ## Check relative Markdown files and heading anchors.
+	python3 scripts/check-markdown-links.py
+
+test-markdown-links: ## Run unit tests for scripts/check-markdown-links.py.
+	python3 scripts/test_check_markdown_links.py
+
+snapshot: wasm ## Regenerate the checked-in contract interface snapshot.
+	stellar contract inspect --wasm $(WASM) > docs/interface.txt
 
 # Native debug build.
 build: ## Native debug build.
