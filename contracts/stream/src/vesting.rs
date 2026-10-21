@@ -130,6 +130,11 @@ mod tests {
     }
 
     #[test]
+    fn exact_vesting_at_the_midpoint() {
+        assert_eq!(vested_amount(TOTAL, START, END, START, 600), 500);
+    }
+
+    #[test]
     fn quarter_vests_at_quarter_point() {
         assert_eq!(vested_amount(TOTAL, START, END, START, 350), 250);
     }
@@ -142,6 +147,13 @@ mod tests {
     #[test]
     fn full_amount_vests_after_end() {
         assert_eq!(vested_amount(TOTAL, START, END, START, 9_999), TOTAL);
+    }
+
+    #[test]
+    fn vesting_never_exceeds_the_total() {
+        for now in [1_099, 1_100, 1_101, 2_000, 10_000, 100_000] {
+            assert!(vested_amount(TOTAL, START, END, START, now) <= TOTAL);
+        }
     }
 
     #[test]
@@ -214,7 +226,10 @@ mod tests {
         assert_eq!(vested_amount(total, start, end, start, start + 1), 0);
         assert_eq!(vested_amount(total, start, end, start, end - 1), 0);
         assert_eq!(vested_amount(total, start, end, start, end), 1);
-        assert_eq!(withdrawable_amount(vested_amount(total, start, end, start, end), 0), 1);
+        assert_eq!(
+            withdrawable_amount(vested_amount(total, start, end, start, end), 0),
+            1
+        );
     }
 
     #[test]
@@ -257,6 +272,25 @@ mod tests {
         let s = settlement(TOTAL, 750, 750);
         assert_eq!(s.refund, 250);
         assert_eq!(s.recipient_remaining, 0);
+    }
+
+    /// Issue #357 — settlement is a pure split of the remaining escrow. It
+    /// must be deterministic and conserve every unit not already withdrawn.
+    #[test]
+    fn settlement_is_pure_and_conserves_remaining_escrow() {
+        for (total, vested, withdrawn) in [
+            (1_000, 0, 0),
+            (1_000, 500, 0),
+            (1_000, 500, 200),
+            (1_000, 999, 999),
+            (1_000, 1_000, 400),
+        ] {
+            let first = settlement(total, vested, withdrawn);
+            let second = settlement(total, vested, withdrawn);
+
+            assert_eq!(first, second);
+            assert_eq!(first.refund + first.recipient_remaining, total - withdrawn);
+        }
     }
 }
 
@@ -333,6 +367,33 @@ mod proptests {
                 (withdrawn, vested)
             };
             prop_assert_eq!(withdrawable_amount(v, wd), v - wd);
+        }
+
+        /// Settlement must account for the whole escrow: the refund plus the
+        /// recipient's remaining share plus what has already been withdrawn
+        /// must equal the total amount.
+        #[test]
+        fn settlement_accounts_for_the_whole_escrow(
+            total in 0i128..=i64::MAX as i128,
+            vested in 0i128..=i64::MAX as i128,
+            withdrawn in 0i128..=i64::MAX as i128,
+        ) {
+            // Constrain inputs to valid ranges: withdrawn <= vested <= total.
+            let vested = vested.min(total);
+            let withdrawn = withdrawn.min(vested);
+
+            let s = settlement(total, vested, withdrawn);
+
+            // The three amounts must sum to the total.
+            prop_assert_eq!(
+                s.refund + s.recipient_remaining + withdrawn,
+                total,
+                "settlement must account for the entire escrow"
+            );
+
+            // Neither part may be negative.
+            prop_assert!(s.refund >= 0, "refund must be non-negative");
+            prop_assert!(s.recipient_remaining >= 0, "recipient_remaining must be non-negative");
         }
     }
 }

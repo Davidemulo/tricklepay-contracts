@@ -44,6 +44,68 @@ pub struct Withdrawn {
 /// Emitted when a sender cancels a stream. Carries both sides of the split so
 /// the recipient's accrued amount and the sender's refund are visible without
 /// a follow-up query.
+///
+/// # Decision: recipient as a topic
+///
+/// The `Cancelled` event indexes only `sender` as a topic. `Created` indexes
+/// both `sender` and `recipient`, and `Withdrawn` indexes `recipient`, but
+/// `Cancelled` does not carry `recipient` as a second topic.
+///
+/// **Indexer impact:** An indexer that wants to find every cancellation
+/// affecting a specific recipient must either:
+/// 1. Fetch all `Cancelled` events and filter by the `recipient_amount` field
+///    (which is not indexed), requiring a full event scan, or
+/// 2. Subscribe to `Created` events for that recipient, record the stream ids,
+///    then query each one with `get_stream` to check the `cancelled` flag, or
+/// 3. Subscribe to `Cancelled` events, fetch the corresponding stream record
+///    with `get_stream(id)`, and check if `stream.recipient` matches the
+///    target address.
+///
+/// Adding `#[topic] recipient: Address` would eliminate all three workarounds:
+/// an indexer could filter `Cancelled` by recipient the same way it filters
+/// `Created` and `Withdrawn`.
+///
+/// **Trade-off:** Adding a topic is an event schema change. Every off-chain
+/// consumer that parses `Cancelled` events — indexers, explorers, client
+/// libraries, monitoring tools — would need to update their event parsers to
+/// handle the new topic layout. Existing code that expects `Cancelled` to have
+/// one topic (`sender`) would break when it encounters a two-topic event from
+/// a redeployed contract. The convenience of recipient-filtered cancellation
+/// queries must be weighed against the coordination cost of getting every
+/// downstream consumer to update simultaneously.
+///
+/// **Who would break:** Any service that decodes `Cancelled` events using a
+/// fixed schema (e.g., a Horizon indexer, the tricklepay-backend event
+/// processor, a block explorer, or a client library that maps event topics to
+/// struct fields). These services would see parsing errors or misaligned fields
+/// when the topic count changes. If the contract were redeployed with the new
+/// schema while an indexer still expected the old one, every `Cancelled` event
+/// would fail to parse until the indexer updated. This is not a silent
+/// degradation — it is a hard break that surfaces immediately.
+///
+/// **Workaround cost:** Without the topic, an indexer can still track
+/// cancellations for a recipient by listening to `Created` events for that
+/// address (which are already indexed by recipient) and periodically polling
+/// `get_stream(id)` or listening to all `Cancelled` events and doing a
+/// post-filter lookup. This is less efficient than a direct topic filter, but
+/// it works with the existing schema and does not require redeployment or
+/// coordinated updates.
+///
+/// **Decision:** The recipient is **not added as a topic** to `Cancelled`.
+/// The convenience of recipient-filtered cancellation queries does not justify
+/// the coordination cost and breaking change for all downstream consumers. If
+/// this decision is revisited in a future contract version, the change should
+/// be accompanied by:
+/// - A changelog entry marking the event schema as breaking.
+/// - Updated event documentation in `events.rs` and the README showing the new
+///   two-topic layout.
+/// - Notification to all known indexers (Horizon, tricklepay-backend, any
+///   third-party explorers) with a schema migration guide.
+/// - A version bump or redeployment announcement so clients can distinguish
+///   old-schema and new-schema contract instances.
+///
+/// See the event schema documentation in the README's "Event schemas for
+/// indexers" section for the full compatibility note on event changes.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Cancelled {
@@ -72,30 +134,12 @@ pub(crate) fn publish_created(env: &Env, id: u64, stream: &Stream) {
     .publish(env);
 }
 
-/// Publish [`Withdrawn`] for `amount` sent to `recipient` from stream `id`.
+/// Publish [`Withdrawn`] after tokens have been transferred to the recipient.
 pub(crate) fn publish_withdrawn(env: &Env, recipient: &Address, id: u64, amount: i128) {
     Withdrawn {
         recipient: recipient.clone(),
         id,
         amount,
-    }
-    .publish(env);
-}
-
-/// Publish [`Cancelled`] for stream `id`, carrying the recipient's accrued
-/// amount and the sender's refund.
-pub(crate) fn publish_cancelled(
-    env: &Env,
-    sender: &Address,
-    id: u64,
-    recipient_amount: i128,
-    sender_refund: i128,
-) {
-    Cancelled {
-        sender: sender.clone(),
-        id,
-        recipient_amount,
-        sender_refund,
     }
     .publish(env);
 }

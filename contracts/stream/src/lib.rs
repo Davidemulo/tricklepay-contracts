@@ -1,4 +1,5 @@
 #![no_std]
+#![deny(unsafe_code)]
 
 //! TricklePay stream contract.
 //!
@@ -33,15 +34,21 @@
 //!   - [`StreamContract::cancel`]: Stop an active stream early and receive a refund of unvested tokens.
 //! - **State & Balance Queries**:
 //!   - [`StreamContract::get_stream`]: Fetch full stream metadata and state.
+//!   - [`StreamContract::stream_exists`]: Check whether a stream record exists.
 //!   - [`StreamContract::withdrawable`]: Query tokens vested but not yet withdrawn.
 //!   - [`StreamContract::vested`]: Query total tokens vested since creation.
+//!   - [`StreamContract::vested_at`]: Project vested tokens at a chosen timestamp.
 //!   - [`StreamContract::locked`]: Query unvested tokens still held by the contract.
 //!   - [`StreamContract::progress`]: Query vesting progress in basis points (0–10000).
 //!   - [`StreamContract::status`]: Query current lifecycle status ([`StreamStatus`]).
 //!   - [`StreamContract::stream_count`]: Query total number of streams created.
+//!   - [`StreamContract::max_amount`]: Query the maximum accepted stream amount.
 //!
 //! For calculation details on linear vesting, see the [`vesting`] module, and
 //! for the lifecycle status rules see the [`status`] module.
+
+#[cfg(test)]
+extern crate std;
 
 mod contract;
 mod error;
@@ -52,8 +59,18 @@ mod types;
 pub mod vesting;
 
 #[cfg(test)]
-mod test;
+mod tests;
 
 pub use contract::{StreamContract, StreamContractClient, MAX_AMOUNT};
 pub use error::StreamError;
 pub use types::{Stream, StreamStatus};
+
+use soroban_sdk::contractmeta;
+
+// Embed contract metadata for on-chain inspection via stellar contract info meta
+contractmeta!(key = "version", val = env!("CARGO_PKG_VERSION"));
+
+contractmeta!(
+    key = "repository",
+    val = "https://github.com/TricklePay/tricklepay-contracts"
+);
